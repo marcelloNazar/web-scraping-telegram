@@ -21,8 +21,8 @@ class GoogleSheetsLoader:
             sheet_url: URL pública da planilha (formato CSV)
                       Formato: https://docs.google.com/spreadsheets/d/SHEET_ID/export?format=csv&gid=0
         """
-        # URL padrão da planilha (substitua pela URL real da sua planilha)
-        self.sheet_url = sheet_url or "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/export?format=csv&gid=0"
+        # URL real da planilha (CHIP 2 com 204 grupos brasileiros)
+        self.sheet_url = sheet_url or "https://docs.google.com/spreadsheets/d/1sOnKOz7qqx3bumgNp8-d5_slE3HE3JhGkD8SQjGCAcA/export?format=csv&gid=2025195276"
         self.cache_duration = 300  # Cache por 5 minutos
         self._cached_groups = None
         self._cache_time = 0
@@ -84,22 +84,35 @@ class GoogleSheetsLoader:
 
         for _, row in df.iterrows():
             try:
+                # Filtrar apenas grupos do chip 2
+                if str(row.get('Chip', '')).strip() != '02':
+                    continue
+
                 # Extrair username e limpar
-                username = str(row.get('To Scrape', '')).replace("'", "").strip()
+                username = str(row.get('Username', '')).strip()
                 if not username or username.lower() in ['nan', 'none', '']:
                     continue
 
                 # Garantir que username começa com @
                 if not username.startswith('@'):
-                    username = f"@{username}"
+                    continue
 
-                # Extrair outras informações
+                # Extrair informações conforme estrutura real da planilha
                 group_info = {
                     'username': username,
-                    'spectrum': str(row.get('Spectrum', '')).lower().strip(),
-                    'stance': str(row.get('Stance', '')).lower().strip(),
-                    'identity': str(row.get('Identity', '')).lower().strip(),
-                    'active': True  # Por padrão, todos os grupos são ativos
+                    'url': row.get('URL', ''),
+                    'category': row.get('Category', 'Pol'),  # Pol, Brasil
+                    'type': row.get('Type', ''),  # News, Debate, Meme, Group-affiliated, Personality
+                    'spectrum': row.get('Spectrum', ''),  # Right, Left, General
+                    'orientation': row.get('Orientation', ''),  # Conservative, Progressive
+                    'sub_category': row.get('Sub-category', ''),  # Red Pill, Religious, Socialist/Communist, etc.
+                    'affiliation': row.get('Affiliation', ''),  # Bolsonarista, Lulista/Petista, None
+                    'territory': row.get('Territory', ''),  # National, State-level
+                    'description': row.get('Description', ''),
+                    'members': row.get('Members', 0),
+                    'chip': '02',
+                    'views': row.get('Views', 0),
+                    'active': True
                 }
 
                 # Filtrar grupos inválidos
@@ -136,20 +149,9 @@ class GoogleSheetsLoader:
     def _get_fallback_groups(self) -> List[Dict]:
         """Lista de grupos fallback caso a planilha não funcione"""
         return [
-            {
-                'username': '@LulanoTelegram',
-                'spectrum': 'left',
-                'stance': 'progressive',
-                'identity': 'political',
-                'active': True
-            },
-            {
-                'username': '@jairbolsonarobrasil',
-                'spectrum': 'right',
-                'stance': 'conservative',
-                'identity': 'political',
-                'active': True
-            }
+            {'username': '@SputnikBrasil', 'spectrum': 'Left', 'orientation': 'Progressive', 'members': 55680, 'active': True},
+            {'username': '@mblivre', 'spectrum': 'Right', 'orientation': 'Conservative', 'members': 28215, 'active': True},
+            {'username': '@plenonews', 'spectrum': 'General', 'orientation': 'General', 'members': 13220, 'active': True}
         ]
 
     def get_groups_by_spectrum(self, spectrum: str) -> List[Dict]:
@@ -202,6 +204,48 @@ class GoogleSheetsLoader:
             stats['by_identity'][identity] = stats['by_identity'].get(identity, 0) + 1
 
         return stats
+
+    def print_stats(self):
+        """Imprimir estatísticas dos grupos"""
+        groups = self.load_groups()
+
+        print(f"\n📊 ESTATÍSTICAS DOS GRUPOS CHIP 2:")
+        print(f"Total de grupos: {len(groups)}")
+
+        # Por espectro político
+        spectrums = {}
+        for group in groups:
+            spectrum = group.get('spectrum', 'Unknown')
+            spectrums[spectrum] = spectrums.get(spectrum, 0) + 1
+        print(f"Por espectro político: {spectrums}")
+
+        # Por tipo de canal
+        types = {}
+        for group in groups:
+            channel_type = group.get('type', 'Unknown')
+            types[channel_type] = types.get(channel_type, 0) + 1
+        print(f"Por tipo: {types}")
+
+        # Por orientação
+        orientations = {}
+        for group in groups:
+            orientation = group.get('orientation', 'Unknown')
+            orientations[orientation] = orientations.get(orientation, 0) + 1
+        print(f"Por orientação: {orientations}")
+
+        # Por afiliação política
+        affiliations = {}
+        for group in groups:
+            affiliation = group.get('affiliation', 'None')
+            affiliations[affiliation] = affiliations.get(affiliation, 0) + 1
+        print(f"Por afiliação: {affiliations}")
+
+        # Primeiros 10 grupos mais populares
+        sorted_groups = sorted(groups, key=lambda x: int(str(x.get('members', 0)).replace(',', '').replace('.', '') or 0), reverse=True)
+        print(f"\n📋 Top 10 grupos por membros:")
+        for i, group in enumerate(sorted_groups[:10]):
+            members = group.get('members', 0)
+            print(f"  {i+1}. {group['username']} ({members:,} membros - {group.get('spectrum', 'N/A')})")
 
 
 # Função de conveniência para uso direto
