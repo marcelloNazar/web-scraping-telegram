@@ -1,0 +1,56 @@
+# TelegramScrap - Arquivos para ignorar no Git
+
+# Credenciais sensíveis
+config/telegram_credentials.py
+CREDENCIAIS_PARA_VM.md
+
+# Dados e arquivos temporários
+data/*.parquet
+data/*.xlsx
+data/*.csv
+*.parquet
+*.xlsx
+backup_*
+FINAL_*
+complete_*
+
+# Sessões Telegram
+*.session
+telegram_session*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.env
+.venv
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# AWS
+.aws/
+*.pem
+
+# Temporary files
+tmp/
+temp/
