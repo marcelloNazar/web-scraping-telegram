@@ -85,56 +85,55 @@ class GoogleSheetsLoader:
         print(f"📊 DataFrame shape: {df.shape}")
         print(f"📊 Colunas encontradas: {list(df.columns)}")
 
-        # A planilha pode não ter cabeçalhos, vamos usar índices de coluna
-        # Baseado na estrutura dos dados fornecidos:
-        # Col 0: Username com aspas, Col 1: URL, Col 2: Username limpo, Col 3: Category, etc.
+        # Usar nomes de colunas reais encontrados:
+        # 'To Scrape', 'Url', 'Group', 'Project', 'Country', 'Format', 'Spectrum', 'Stance', 'Identity', 'Basis', 'Territory', 'Name', 'Description', 'Users', 'To Categorize', 'Chip', '2025-07'
 
         for index, row in df.iterrows():
             try:
-                # Converter row para lista para acessar por índice
-                row_values = row.tolist()
-
-                # Verificar se temos colunas suficientes
-                if len(row_values) < 16:
+                # Filtrar apenas grupos do chip 2 ('02' ou '2')
+                chip = str(row.get('Chip', '')).strip()
+                if chip not in ['02', '2']:
                     continue
 
-                # Extrair valores por posição (baseado na estrutura fornecida)
-                username_quoted = str(row_values[0]).strip() if len(row_values) > 0 else ''
-                url = str(row_values[1]).strip() if len(row_values) > 1 else ''
-                username_clean = str(row_values[2]).strip() if len(row_values) > 2 else ''
-                category = str(row_values[3]).strip() if len(row_values) > 3 else 'Pol'
-                country = str(row_values[4]).strip() if len(row_values) > 4 else 'Brasil'
-                channel_type = str(row_values[5]).strip() if len(row_values) > 5 else ''
-                spectrum = str(row_values[6]).strip() if len(row_values) > 6 else ''
-                orientation = str(row_values[7]).strip() if len(row_values) > 7 else ''
-                sub_category = str(row_values[8]).strip() if len(row_values) > 8 else ''
-                affiliation = str(row_values[9]).strip() if len(row_values) > 9 else ''
-                territory = str(row_values[10]).strip() if len(row_values) > 10 else ''
-                description = str(row_values[11]).strip() if len(row_values) > 11 else ''
-                # row_values[12] parece ser sempre '-'
-                members_str = str(row_values[13]).strip() if len(row_values) > 13 else '0'
-                # row_values[14] parece ser metadados
-                chip = str(row_values[15]).strip() if len(row_values) > 15 else ''
-                views_str = str(row_values[16]).strip() if len(row_values) > 16 else '0'
-
-                # Filtrar apenas grupos do chip 2 ('02')
-                if chip != '02':
+                # Extrair username do campo 'Group'
+                username = str(row.get('Group', '')).strip()
+                if not username:
                     continue
 
-                # Limpar username (remover aspas e espaços)
-                username = username_clean.replace("'", "").strip()
+                # Limpar username (remover aspas se houver)
+                username = username.replace("'", "").replace('"', "").strip()
+
+                # Garantir que começa com @
                 if not username.startswith('@'):
-                    continue
+                    if username and not username.lower() in ['nan', 'none', '']:
+                        username = f"@{username}"
+                    else:
+                        continue
 
-                # Processar membros (converter '55.680' para 55680)
+                # Extrair outras informações usando os nomes de coluna reais
+                url = str(row.get('Url', '')).strip()
+                project = str(row.get('Project', 'Pol')).strip()
+                country = str(row.get('Country', 'Brasil')).strip()
+                channel_format = str(row.get('Format', '')).strip()  # News, Debate, etc
+                spectrum = str(row.get('Spectrum', '')).strip()  # Right, Left, General
+                stance = str(row.get('Stance', '')).strip()  # Conservative, Progressive
+                identity = str(row.get('Identity', '')).strip()  # Red Pill, Religious, etc
+                basis = str(row.get('Basis', '')).strip()  # Bolsonarista, Lulista/Petista, None
+                territory = str(row.get('Territory', '')).strip()  # National, State-level
+                name = str(row.get('Name', '')).strip()
+                description = str(row.get('Description', '')).strip()
+
+                # Processar usuários/membros
+                users_str = str(row.get('Users', '0')).strip()
                 try:
-                    members = int(members_str.replace('.', '').replace(',', '').replace(' ', '')) if members_str and members_str != '-' else 0
+                    members = int(users_str.replace('.', '').replace(',', '').replace(' ', '')) if users_str and users_str not in ['-', 'nan', ''] else 0
                 except:
                     members = 0
 
-                # Processar views
+                # Processar views da última coluna
+                views_str = str(row.get('2025-07', '0')).strip()
                 try:
-                    views = int(views_str.replace('.', '').replace(',', '').replace(' ', '')) if views_str and views_str != '-' else 0
+                    views = int(views_str.replace('.', '').replace(',', '').replace(' ', '')) if views_str and views_str not in ['-', 'nan', ''] else 0
                 except:
                     views = 0
 
@@ -142,14 +141,15 @@ class GoogleSheetsLoader:
                 group_info = {
                     'username': username,
                     'url': url,
-                    'category': category,
+                    'project': project,
                     'country': country,
-                    'type': channel_type,
+                    'format': channel_format,
                     'spectrum': spectrum,
-                    'orientation': orientation,
-                    'sub_category': sub_category,
-                    'affiliation': affiliation,
+                    'stance': stance,
+                    'identity': identity,
+                    'basis': basis,
                     'territory': territory,
+                    'name': name,
                     'description': description,
                     'members': members,
                     'chip': chip,
@@ -261,26 +261,26 @@ class GoogleSheetsLoader:
             spectrums[spectrum] = spectrums.get(spectrum, 0) + 1
         print(f"Por espectro político: {spectrums}")
 
-        # Por tipo de canal
-        types = {}
+        # Por formato/tipo de canal
+        formats = {}
         for group in groups:
-            channel_type = group.get('type', 'Unknown')
-            types[channel_type] = types.get(channel_type, 0) + 1
-        print(f"Por tipo: {types}")
+            channel_format = group.get('format', 'Unknown')
+            formats[channel_format] = formats.get(channel_format, 0) + 1
+        print(f"Por formato: {formats}")
 
-        # Por orientação
-        orientations = {}
+        # Por stance
+        stances = {}
         for group in groups:
-            orientation = group.get('orientation', 'Unknown')
-            orientations[orientation] = orientations.get(orientation, 0) + 1
-        print(f"Por orientação: {orientations}")
+            stance = group.get('stance', 'Unknown')
+            stances[stance] = stances.get(stance, 0) + 1
+        print(f"Por stance: {stances}")
 
-        # Por afiliação política
-        affiliations = {}
+        # Por basis (afiliação política)
+        bases = {}
         for group in groups:
-            affiliation = group.get('affiliation', 'None')
-            affiliations[affiliation] = affiliations.get(affiliation, 0) + 1
-        print(f"Por afiliação: {affiliations}")
+            basis = group.get('basis', 'None')
+            bases[basis] = bases.get(basis, 0) + 1
+        print(f"Por basis: {bases}")
 
         # Por território
         territories = {}
@@ -295,8 +295,8 @@ class GoogleSheetsLoader:
         for i, group in enumerate(sorted_groups[:10]):
             members = group.get('members', 0)
             spectrum = group.get('spectrum', 'N/A')
-            affiliation = group.get('affiliation', 'None')
-            print(f"  {i+1}. {group['username']} ({members:,} membros - {spectrum}/{affiliation})")
+            basis = group.get('basis', 'None')
+            print(f"  {i+1}. {group['username']} ({members:,} membros - {spectrum}/{basis})")
 
         # Estatísticas de membros
         total_members = sum(group.get('members', 0) for group in groups)
@@ -311,6 +311,13 @@ class GoogleSheetsLoader:
             spectrum_groups = [g for g in groups if g.get('spectrum') == spectrum]
             spectrum_members = sum(g.get('members', 0) for g in spectrum_groups)
             print(f"  {spectrum}: {len(spectrum_groups)} grupos, {spectrum_members:,} membros")
+
+        # Estatísticas por stance
+        print(f"\n📍 Distribuição por stance:")
+        for stance in ['Conservative', 'Progressive', 'General']:
+            stance_groups = [g for g in groups if g.get('stance') == stance]
+            stance_members = sum(g.get('members', 0) for g in stance_groups)
+            print(f"  {stance}: {len(stance_groups)} grupos, {stance_members:,} membros")
 
 
 # Função de conveniência para uso direto
