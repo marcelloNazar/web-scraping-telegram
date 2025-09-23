@@ -1,0 +1,19 @@
+{
+  "version": "8.5.0",
+  "objects": [
+    {
+      "id": "message-classification-pie",
+      "type": "visualization",
+      "attributes": {
+        "title": "Classificação de Mensagens (POL/CONSPIRA/NAZ)",
+        "visState": "{\"title\":\"Classificação de Mensagens (POL/CONSPIRA/NAZ)\",\"type\":\"pie\",\"aggs\":[{\"id\":\"1\",\"type\":\"count\",\"schema\":\"metric\",\"params\":{}},{\"id\":\"2\",\"type\":\"terms\",\"schema\":\"segment\",\"params\":{\"field\":\"category_1\",\"size\":10,\"order\":\"desc\",\"orderBy\":\"1\",\"otherBucket\":false,\"otherBucketLabel\":\"Other\",\"missingBucket\":false,\"missingBucketLabel\":\"Missing\"}}]}",
+        "uiStateJSON": "{\"vis\":{\"legendOpen\":true}}",
+        "description": "Distribuição de mensagens por categoria política: POL (Política), CONSPIRA (Conspiração), NAZ (Extremismo)",
+        "version": 1,
+        "kibanaSavedObjectMeta": {
+          "searchSourceJSON": "{\"index\":\"telegram-messages-*\",\"query\":{\"match_all\":{}},\"filter\":[]}"
+        }
+      }
+    }
+  ]
+}
