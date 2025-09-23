@@ -1,0 +1,45 @@
+{
+  "version": "8.5.0",
+  "objects": [
+    {
+      "id": "political-analysis-dashboard",
+      "type": "dashboard",
+      "attributes": {
+        "title": "TelegramScrap - Análise Política Avançada",
+        "hits": 0,
+        "description": "Dashboard focado em análise política: classificação de conteúdo, espectro político e comparação temporal",
+        "panelsJSON": "[{\"version\":\"8.5.0\",\"gridData\":{\"x\":0,\"y\":0,\"w\":24,\"h\":20,\"i\":\"1\"},\"panelIndex\":\"1\",\"embeddableConfig\":{},\"panelRefName\":\"panel_1\"},{\"version\":\"8.5.0\",\"gridData\":{\"x\":24,\"y\":0,\"w\":24,\"h\":20,\"i\":\"2\"},\"panelIndex\":\"2\",\"embeddableConfig\":{},\"panelRefName\":\"panel_2\"},{\"version\":\"8.5.0\",\"gridData\":{\"x\":0,\"y\":20,\"w\":48,\"h\":20,\"i\":\"3\"},\"panelIndex\":\"3\",\"embeddableConfig\":{},\"panelRefName\":\"panel_3\"},{\"version\":\"8.5.0\",\"gridData\":{\"x\":0,\"y\":40,\"w\":48,\"h\":20,\"i\":\"4\"},\"panelIndex\":\"4\",\"embeddableConfig\":{},\"panelRefName\":\"panel_4\"}]",
+        "optionsJSON": "{\"useMargins\":true,\"syncColors\":true,\"hidePanelTitles\":false}",
+        "version": 1,
+        "timeRestore": true,
+        "timeTo": "now",
+        "timeFrom": "now-7d",
+        "kibanaSavedObjectMeta": {
+          "searchSourceJSON": "{\"query\":{\"query\":\"\",\"language\":\"kuery\"},\"filter\":[]}"
+        }
+      },
+      "references": [
+        {
+          "name": "panel_1",
+          "type": "visualization",
+          "id": "message-classification-pie"
+        },
+        {
+          "name": "panel_2",
+          "type": "visualization",
+          "id": "political-spectrum-bar"
+        },
+        {
+          "name": "panel_3",
+          "type": "visualization",
+          "id": "messages-timeline"
+        },
+        {
+          "name": "panel_4",
+          "type": "visualization",
+          "id": "top-groups-volume"
+        }
+      ]
+    }
+  ]
+}
