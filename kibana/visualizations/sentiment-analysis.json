@@ -1,0 +1,19 @@
+{
+  "version": "8.5.0",
+  "objects": [
+    {
+      "id": "sentiment-analysis",
+      "type": "visualization",
+      "attributes": {
+        "title": "Análise de Sentimento",
+        "visState": "{\"title\":\"Análise de Sentimento\",\"type\":\"pie\",\"aggs\":[{\"id\":\"1\",\"type\":\"count\",\"schema\":\"metric\",\"params\":{}},{\"id\":\"2\",\"type\":\"terms\",\"schema\":\"segment\",\"params\":{\"field\":\"sentiment\",\"size\":5,\"order\":\"desc\",\"orderBy\":\"1\",\"otherBucket\":false,\"otherBucketLabel\":\"Other\",\"missingBucket\":false,\"missingBucketLabel\":\"Missing\"}}]}",
+        "uiStateJSON": "{\"vis\":{\"legendOpen\":true}}",
+        "description": "Distribuição do sentimento das mensagens: positivo, negativo, neutro",
+        "version": 1,
+        "kibanaSavedObjectMeta": {
+          "searchSourceJSON": "{\"index\":\"telegram-messages-*\",\"query\":{\"match_all\":{}},\"filter\":[]}"
+        }
+      }
+    }
+  ]
+}
