@@ -1,0 +1,19 @@
+{
+  "version": "8.5.0",
+  "objects": [
+    {
+      "id": "top-groups-volume",
+      "type": "visualization",
+      "attributes": {
+        "title": "Top 15 Grupos por Volume",
+        "visState": "{\"title\":\"Top 15 Grupos por Volume\",\"type\":\"horizontal_bar\",\"aggs\":[{\"id\":\"1\",\"type\":\"count\",\"schema\":\"metric\",\"params\":{}},{\"id\":\"2\",\"type\":\"terms\",\"schema\":\"segment\",\"params\":{\"field\":\"group_name\",\"size\":15,\"order\":\"desc\",\"orderBy\":\"1\",\"otherBucket\":false,\"otherBucketLabel\":\"Other\",\"missingBucket\":false,\"missingBucketLabel\":\"Missing\"}}]}",
+        "uiStateJSON": "{}",
+        "description": "15 grupos com maior volume de mensagens coletadas",
+        "version": 1,
+        "kibanaSavedObjectMeta": {
+          "searchSourceJSON": "{\"index\":\"telegram-messages-*\",\"query\":{\"match_all\":{}},\"filter\":[]}"
+        }
+      }
+    }
+  ]
+}
