@@ -1,0 +1,17 @@
+{
+  "version": "8.5.0",
+  "objects": [
+    {
+      "id": "telegram-messages-*",
+      "type": "index-pattern",
+      "attributes": {
+        "title": "telegram-messages-*",
+        "timeFieldName": "date_message",
+        "fields": "[{\"name\":\"@timestamp\",\"type\":\"date\",\"searchable\":true,\"aggregatable\":true},{\"name\":\"@version\",\"type\":\"string\",\"searchable\":true,\"aggregatable\":true},{\"name\":\"message_id\",\"type\":\"string\",\"searchable\":true,\"aggregatable\":true},{\"name\":\"group_name\",\"type\":\"string\",\"searchable\":true,\"aggregatable\":true},{\"name\":\"content\",\"type\":\"string\",\"searchable\":true,\"aggregatable\":false},{\"name\":\"content.keyword\",\"type\":\"string\",\"searchable\":true,\"aggregatable\":true},{\"name\":\"date_message\",\"type\":\"date\",\"searchable\":true,\"aggregatable\":true},{\"name\":\"views\",\"type\":\"number\",\"searchable\":true,\"aggregatable\":true},{\"name\":\"reactions\",\"type\":\"number\",\"searchable\":true,\"aggregatable\":true},{\"name\":\"shares\",\"type\":\"number\",\"searchable\":true,\"aggregatable\":true},{\"name\":\"category_1\",\"type\":\"string\",\"searchable\":true,\"aggregatable\":true},{\"name\":\"category_4\",\"type\":\"string\",\"searchable\":true,\"aggregatable\":true},{\"name\":\"sentiment\",\"type\":\"string\",\"searchable\":true,\"aggregatable\":true},{\"name\":\"content_tokens\",\"type\":\"string\",\"searchable\":true,\"aggregatable\":true},{\"name\":\"group_spectrum\",\"type\":\"string\",\"searchable\":true,\"aggregatable\":true},{\"name\":\"group_stance\",\"type\":\"string\",\"searchable\":true,\"aggregatable\":true},{\"name\":\"processed_at\",\"type\":\"date\",\"searchable\":true,\"aggregatable\":true}]",
+        "fieldFormatMap": "{\"views\":{\"id\":\"number\"},\"reactions\":{\"id\":\"number\"},\"shares\":{\"id\":\"number\"}}",
+        "runtimeFieldMap": "{}",
+        "allowNoIndex": false
+      }
+    }
+  ]
+}
