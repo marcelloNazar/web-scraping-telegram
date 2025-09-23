@@ -1,0 +1,19 @@
+{
+  "version": "8.5.0",
+  "objects": [
+    {
+      "id": "engagement-metrics",
+      "type": "visualization",
+      "attributes": {
+        "title": "Métricas de Engajamento",
+        "visState": "{\"title\":\"Métricas de Engajamento\",\"type\":\"metric\",\"aggs\":[{\"id\":\"1\",\"type\":\"sum\",\"schema\":\"metric\",\"params\":{\"field\":\"views\",\"customLabel\":\"Total Views\"}},{\"id\":\"2\",\"type\":\"sum\",\"schema\":\"metric\",\"params\":{\"field\":\"reactions\",\"customLabel\":\"Total Reactions\"}},{\"id\":\"3\",\"type\":\"sum\",\"schema\":\"metric\",\"params\":{\"field\":\"shares\",\"customLabel\":\"Total Shares\"}}]}",
+        "uiStateJSON": "{}",
+        "description": "Somas totais de views, reactions e shares das mensagens",
+        "version": 1,
+        "kibanaSavedObjectMeta": {
+          "searchSourceJSON": "{\"index\":\"telegram-messages-*\",\"query\":{\"match_all\":{}},\"filter\":[]}"
+        }
+      }
+    }
+  ]
+}
