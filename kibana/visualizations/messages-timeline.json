@@ -1,0 +1,19 @@
+{
+  "version": "8.5.0",
+  "objects": [
+    {
+      "id": "messages-timeline",
+      "type": "visualization",
+      "attributes": {
+        "title": "Timeline de Mensagens",
+        "visState": "{\"title\":\"Timeline de Mensagens\",\"type\":\"line\",\"aggs\":[{\"id\":\"1\",\"type\":\"count\",\"schema\":\"metric\",\"params\":{}},{\"id\":\"2\",\"type\":\"date_histogram\",\"schema\":\"segment\",\"params\":{\"field\":\"date_message\",\"interval\":\"auto\",\"customInterval\":\"2h\",\"min_doc_count\":1,\"extended_bounds\":{}}}]}",
+        "uiStateJSON": "{}",
+        "description": "Distribuição temporal das mensagens coletadas",
+        "version": 1,
+        "kibanaSavedObjectMeta": {
+          "searchSourceJSON": "{\"index\":\"telegram-messages-*\",\"query\":{\"match_all\":{}},\"filter\":[]}"
+        }
+      }
+    }
+  ]
+}
