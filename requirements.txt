@@ -49,5 +49,8 @@ ipywidgets>=8.0.0
 # Optional: HTTP authentication for Elasticsearch
 requests-auth>=6.0.0
 
+# AWS Signature Version 4 for OpenSearch VPC access
+requests-aws4auth>=1.1.2
+
 # Security note: Pin major versions to avoid breaking changes
 # Update regularly for security patches
