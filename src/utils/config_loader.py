@@ -28,7 +28,7 @@ class AWSConfig:
     secret_access_key: Optional[str] = None
     region: str = "us-east-1"
     kinesis_stream: str = "telegram-messages"
-    elasticsearch_domain: str = "telegram-analytics"
+    elasticsearch_domain: str = "telegramscrap-search"
 
 @dataclass
 class ScrapingConfig:
@@ -150,7 +150,7 @@ class ConfigLoader:
         config.secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY', config.secret_access_key)
         config.region = os.getenv('AWS_DEFAULT_REGION', config.region)
         config.kinesis_stream = os.getenv('KINESIS_STREAM_NAME', config.kinesis_stream)
-        config.elasticsearch_domain = os.getenv('ELASTICSEARCH_DOMAIN', config.elasticsearch_domain)
+        config.elasticsearch_domain = os.getenv('OPENSEARCH_DOMAIN', os.getenv('ELASTICSEARCH_DOMAIN', config.elasticsearch_domain))
 
         return config
 
