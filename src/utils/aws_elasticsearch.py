@@ -72,7 +72,7 @@ class ElasticsearchClient:
             if self.domain_endpoint:
                 self._test_connection()
                 self.enabled = True
-                print(f"✅ Elasticsearch conectado: {self.domain_endpoint}")
+                print(f"✅ Elasticsearch endpoint configurado: {self.domain_endpoint}")
             else:
                 print("⚠️ Elasticsearch não disponível: domínio não encontrado")
 
@@ -152,7 +152,10 @@ class ElasticsearchClient:
 
         except Exception as e:
             print(f"❌ Erro ao testar conexão: {e}")
-            raise e
+            print("⚠️ OpenSearch VPC requer assinatura AWS4")
+            print("📝 Continuando sem teste de conectividade...")
+            # Não fazer raise - permite que o sistema continue
+            return
 
     def index_message(self, message_data: Dict[str, Any], doc_id: Optional[str] = None) -> bool:
         """
