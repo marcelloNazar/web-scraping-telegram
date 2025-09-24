@@ -76,7 +76,7 @@ def test_complete_pipeline():
                 sent_kinesis += 1
 
     if es_client.enabled:
-        if es_client.bulk_index_messages(sample_messages):
+        if es_client.bulk_index(sample_messages):
             sent_elasticsearch = len(sample_messages)
 
     if monitor.enabled:
