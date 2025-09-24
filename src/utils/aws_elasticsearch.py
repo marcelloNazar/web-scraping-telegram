@@ -95,7 +95,35 @@ class ElasticsearchClient:
                 print(f"❌ Domínio '{self.domain_name}' não foi criado")
                 return
 
-            self.domain_endpoint = f"https://{domain_info['Endpoint']}"
+            # Para dominios VPC, a estrutura pode ser diferente
+            endpoint = None
+            
+            # Tentar diferentes estruturas de endpoint
+            if 'Endpoint' in domain_info:
+                endpoint = domain_info['Endpoint']
+            elif 'Endpoints' in domain_info and 'vpc' in domain_info['Endpoints']:
+                endpoint = domain_info['Endpoints']['vpc']
+            elif 'VPCOptions' in domain_info and 'Endpoint' in domain_info['VPCOptions']:
+                endpoint = domain_info['VPCOptions']['Endpoint']
+            
+            # Se não encontrou via API, tentar variável de ambiente
+            if not endpoint:
+                endpoint = os.getenv('OPENSEARCH_ENDPOINT')
+                if endpoint:
+                    print(f"🔧 Usando endpoint da variável de ambiente: {endpoint}")
+                    # Remover https:// se já tiver
+                    if endpoint.startswith('https://'):
+                        endpoint = endpoint[8:]
+                    elif endpoint.startswith('http://'):
+                        endpoint = endpoint[7:]
+            
+            if endpoint:
+                self.domain_endpoint = f"https://{endpoint}"
+                print(f"🔗 Endpoint configurado: {self.domain_endpoint}")
+            else:
+                print(f"❌ Não foi possível obter endpoint do domínio '{self.domain_name}'")
+                print(f"📋 Debug - domain_info keys: {list(domain_info.keys())}")
+                return
 
         except ClientError as e:
             if e.response['Error']['Code'] == 'ResourceNotFoundException':
