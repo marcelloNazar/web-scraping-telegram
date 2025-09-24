@@ -99,18 +99,25 @@ class ElasticsearchClient:
             session = boto3.Session()
             credentials = session.get_credentials()
             
+            # Obter região atual
+            region = session.region_name or os.getenv('AWS_DEFAULT_REGION', 'us-east-1')
+            print(f"🌍 Região detectada: {region}")
+            
             if not credentials:
                 print("❌ Credenciais AWS não encontradas")
                 return None
                 
-            # Criar assinatura AWS4
+            # Criar assinatura AWS4 com session token (OBRIGATÓRIO para EC2 roles)
             auth = AWS4Auth(
                 credentials.access_key,
                 credentials.secret_key,
-                'us-east-1',  # região
+                region,       # região detectada dinamicamente
                 'es',         # serviço
-                session_token=credentials.token
+                session_token=credentials.token  # CRÍTICO para assumed roles
             )
+            
+            print(f"🔑 Credenciais: access_key={credentials.access_key[:8]}...")
+            print(f"🎫 Session token: {'✅ Presente' if credentials.token else '❌ Ausente'}")
             
             print("✅ AWS4Auth configurado com sucesso")
             return auth
