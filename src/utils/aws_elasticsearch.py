@@ -7,6 +7,7 @@ Interface para Amazon Elasticsearch Service (OpenSearch)
 import json
 import boto3
 import requests
+import os
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from requests.auth import HTTPBasicAuth
@@ -20,7 +21,7 @@ class ElasticsearchClient:
     """Cliente para interagir com AWS Elasticsearch/OpenSearch"""
 
     def __init__(self,
-                 domain_name: str = "telegram-analytics",
+                 domain_name: str = None,
                  region_name: str = "us-east-1",
                  aws_access_key_id: Optional[str] = None,
                  aws_secret_access_key: Optional[str] = None):
@@ -33,6 +34,10 @@ class ElasticsearchClient:
             aws_access_key_id: Chave de acesso AWS (opcional)
             aws_secret_access_key: Chave secreta AWS (opcional)
         """
+        # Usar variável de ambiente ou parâmetro ou fallback
+        if domain_name is None:
+            domain_name = os.getenv('OPENSEARCH_DOMAIN', 'telegramscrap-search')
+        
         self.domain_name = domain_name
         self.region_name = region_name
         self.enabled = False
@@ -391,7 +396,7 @@ class ElasticsearchClient:
 
 
 # Função de conveniência
-def create_elasticsearch_client(domain_name: str = "telegram-analytics",
+def create_elasticsearch_client(domain_name: str = None,
                               region: str = "us-east-1") -> ElasticsearchClient:
     """
     Cria cliente Elasticsearch com configurações padrão
