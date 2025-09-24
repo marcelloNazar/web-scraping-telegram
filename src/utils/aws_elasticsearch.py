@@ -14,6 +14,13 @@ from requests.auth import HTTPBasicAuth
 from botocore.exceptions import ClientError, NoCredentialsError
 import urllib3
 
+try:
+    from requests_aws4auth import AWS4Auth
+    AWS4AUTH_AVAILABLE = True
+except ImportError:
+    AWS4Auth = None
+    AWS4AUTH_AVAILABLE = False
+
 # Suprimir warnings SSL para desenvolvimento
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -81,6 +88,37 @@ class ElasticsearchClient:
             print("📝 Continuando sem indexação")
             self.enabled = False
 
+    def _get_aws4_auth(self):
+        """Cria assinatura AWS4 para requisições OpenSearch VPC"""
+        if not AWS4AUTH_AVAILABLE:
+            print("⚠️ requests-aws4auth não instalado. Use: pip install requests-aws4auth")
+            return None
+            
+        try:
+            # Obter credenciais da sessão boto3
+            session = boto3.Session()
+            credentials = session.get_credentials()
+            
+            if not credentials:
+                print("❌ Credenciais AWS não encontradas")
+                return None
+                
+            # Criar assinatura AWS4
+            auth = AWS4Auth(
+                credentials.access_key,
+                credentials.secret_key,
+                'us-east-1',  # região
+                'es',         # serviço
+                session_token=credentials.token
+            )
+            
+            print("✅ AWS4Auth configurado com sucesso")
+            return auth
+            
+        except Exception as e:
+            print(f"❌ Erro ao configurar AWS4Auth: {e}")
+            return None
+
     def _get_domain_endpoint(self):
         """Obtém endpoint do domínio Elasticsearch"""
         try:
@@ -133,10 +171,15 @@ class ElasticsearchClient:
                 raise e
 
     def _test_connection(self):
-        """Testa conexão com Elasticsearch"""
+        """Testa conexão com Elasticsearch usando AWS4Auth"""
         try:
+            # Obter assinatura AWS4
+            auth = self._get_aws4_auth()
+            
+            # Fazer requisição com assinatura
             response = requests.get(
                 f"{self.domain_endpoint}/_cluster/health",
+                auth=auth,
                 timeout=10,
                 verify=False  # Para desenvolvimento
             )
@@ -182,11 +225,13 @@ class ElasticsearchClient:
             # URL de indexação
             url = f"{self.domain_endpoint}/{self.index_name}/_doc/{doc_id}"
 
-            # Enviar para Elasticsearch
+            # Enviar para Elasticsearch com AWS4Auth
+            auth = self._get_aws4_auth()
             response = requests.put(
                 url,
                 json=document,
                 headers={'Content-Type': 'application/json'},
+                auth=auth,
                 timeout=30,
                 verify=False
             )
@@ -233,12 +278,14 @@ class ElasticsearchClient:
                 bulk_body += json.dumps(action) + "\n"
                 bulk_body += json.dumps(document) + "\n"
 
-            # Enviar bulk request
+            # Enviar bulk request com AWS4Auth
             url = f"{self.domain_endpoint}/_bulk"
+            auth = self._get_aws4_auth()
             response = requests.post(
                 url,
                 data=bulk_body,
                 headers={'Content-Type': 'application/x-ndjson'},
+                auth=auth,
                 timeout=60,
                 verify=False
             )
