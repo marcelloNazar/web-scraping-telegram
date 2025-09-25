@@ -1,136 +1,118 @@
 import json
 import base64
 import boto3
+import os
 from datetime import datetime
-import re
-
-# Cliente Elasticsearch
-es_client = None
 
 def lambda_handler(event, context):
     """
-    Processa mensagens do Kinesis e envia para Elasticsearch
+    Processar mensagens do Kinesis vindas do Jupyter Notebook
+    FOCO: Apenas repassar para OpenSearch com mínimo processamento
     """
+
+    print(f"🔄 Lambda iniciado - {len(event.get('Records', []))} mensagens do Kinesis")
 
     processed_messages = 0
     indexed_messages = 0
+    errors = 0
 
-    print(f"Recebidas {len(event['Records'])} mensagens do Kinesis")
+    # Cliente OpenSearch (simples)
+    opensearch_endpoint = os.environ.get('OPENSEARCH_ENDPOINT')
 
-    for record in event['Records']:
+    for record in event.get('Records', []):
         try:
             # Decodificar dados do Kinesis
             kinesis_data = record['kinesis']['data']
             decoded_data = base64.b64decode(kinesis_data).decode('utf-8')
             message_data = json.loads(decoded_data)
 
-            # Processar mensagem
-            processed_msg = process_telegram_message(message_data)
+            print(f"📨 Processando: {message_data.get('group_name', 'unknown')}")
 
-            # Enviar para Elasticsearch (quando disponível)
-            if es_client and es_client.enabled:
-                success = es_client.index_message(processed_msg)
-                if success:
-                    indexed_messages += 1
+            # Adicionar metadados Lambda
+            enhanced_message = {
+                **message_data,
+                'lambda_processed_at': datetime.utcnow().isoformat(),
+                'pipeline_version': 'jupyter_kinesis_lambda',
+                'kinesis_sequence': record['kinesis']['sequenceNumber']
+            }
+
+            # Enviar para OpenSearch via requests direto
+            success = send_to_opensearch(enhanced_message, opensearch_endpoint)
+            if success:
+                indexed_messages += 1
+                print(f"✅ Indexado: {enhanced_message.get('message_id')}")
 
             processed_messages += 1
 
         except Exception as e:
-            print(f"Erro processando mensagem: {e}")
+            print(f"❌ Erro processando: {e}")
+            errors += 1
             continue
 
-    # Enviar métricas CloudWatch
-    cloudwatch = boto3.client('cloudwatch')
+    # Métricas CloudWatch
     try:
+        cloudwatch = boto3.client('cloudwatch')
         cloudwatch.put_metric_data(
             Namespace='TelegramScrap/Lambda',
             MetricData=[
                 {
                     'MetricName': 'ProcessedMessages',
                     'Value': processed_messages,
-                    'Unit': 'Count',
-                    'Timestamp': datetime.now()
+                    'Unit': 'Count'
                 },
                 {
                     'MetricName': 'IndexedMessages',
                     'Value': indexed_messages,
-                    'Unit': 'Count',
-                    'Timestamp': datetime.now()
+                    'Unit': 'Count'
                 }
             ]
         )
     except Exception as e:
-        print(f"Erro enviando métricas: {e}")
+        print(f"⚠️ Erro métricas: {e}")
 
     return {
         'statusCode': 200,
         'body': json.dumps({
             'processed': processed_messages,
-            'indexed': indexed_messages
+            'indexed': indexed_messages,
+            'errors': errors
         })
     }
 
-def process_telegram_message(message_data):
-    """Processar e enriquecer dados da mensagem"""
+def send_to_opensearch(message, endpoint):
+    """Enviar mensagem para OpenSearch usando requests + AWS4Auth"""
+    try:
+        import requests
+        import boto3
+        from requests_aws4auth import AWS4Auth
 
-    # Classificação automática
-    content = message_data.get('content', '').lower()
+        # Configurar auth
+        session = boto3.Session()
+        credentials = session.get_credentials()
+        region = session.region_name or 'us-east-1'
 
-    # Classificação POL/CONSPIRA/NAZ
-    if any(word in content for word in ['governo', 'presidente', 'política', 'eleição']):
-        category_1 = 'POL'
-    elif any(word in content for word in ['conspiração', 'illuminati', 'deep state']):
-        category_1 = 'CONSPIRA'
-    elif any(word in content for word in ['supremacia', 'hitler', 'nazismo']):
-        category_1 = 'NAZ'
-    else:
-        category_1 = 'OTHER'
+        auth = AWS4Auth(
+            credentials.access_key,
+            credentials.secret_key,
+            region,
+            'es',
+            session_token=credentials.token
+        )
 
-    # Espectro político
-    if any(word in content for word in ['bolsonaro', 'direita', 'conservador']):
-        category_4 = 'Right'
-    elif any(word in content for word in ['lula', 'esquerda', 'progressista']):
-        category_4 = 'Left'
-    else:
-        category_4 = 'General'
+        # Endpoint de indexação
+        index_url = f"{endpoint}/telegram-messages/_doc/{message.get('message_id')}"
 
-    # Análise de sentimento básica
-    positive_words = ['bom', 'ótimo', 'excelente', 'sucesso', 'vitória']
-    negative_words = ['ruim', 'péssimo', 'terrível', 'fracasso', 'derrota']
+        # Enviar
+        response = requests.put(
+            index_url,
+            json=message,
+            auth=auth,
+            timeout=10,
+            verify=False
+        )
 
-    positive_count = sum(1 for word in positive_words if word in content)
-    negative_count = sum(1 for word in negative_words if word in content)
+        return response.status_code in [200, 201]
 
-    if positive_count > negative_count:
-        sentiment = 'positive'
-    elif negative_count > positive_count:
-        sentiment = 'negative'
-    else:
-        sentiment = 'neutral'
-
-    # Extrair tokens para word cloud
-    content_tokens = re.findall(r'\b\w{4,}\b', content)  # Palavras com 4+ caracteres
-
-    # Enriquecer dados
-    message_data.update({
-        'category_1': category_1,
-        'category_4': category_4,
-        'sentiment': sentiment,
-        'content_tokens': content_tokens[:20],  # Top 20 palavras
-        'lambda_processed_at': datetime.now().isoformat()
-    })
-
-    return message_data
-
-def classify_group_type(group_name):
-    """Classificar tipo do grupo baseado no nome"""
-    name_lower = group_name.lower()
-
-    if any(word in name_lower for word in ['news', 'noticia', 'jornal']):
-        return 'News'
-    elif any(word in name_lower for word in ['bolsonaro', 'lula', 'político']):
-        return 'Political'
-    elif any(word in name_lower for word in ['brasil', 'brazil']):
-        return 'National'
-    else:
-        return 'General'
+    except Exception as e:
+        print(f"❌ Erro OpenSearch: {e}")
+        return False
