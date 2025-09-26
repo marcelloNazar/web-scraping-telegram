@@ -123,14 +123,20 @@ def validate_environment():
     
     return {'api_id': api_id, 'api_hash': api_hash}
 
-def setup_telegram_client(api_id, api_hash):
+def setup_telegram_client(api_id, api_hash, session_file=None):
     """Configurar cliente Telegram"""
     try:
         logger.info("📦 Importando Telethon...")
         from telethon.sync import TelegramClient
         logger.info("✅ Telethon importado com sucesso")
         
-        session_file = 'ergoncugler_cinco.session'
+        # Usar ConfigLoader se session_file não fornecido
+        if not session_file:
+            from src.utils.config_loader import load_config
+            config = load_config()
+            telegram_creds = config.get_telegram_credentials()
+            session_file = telegram_creds['session_file']
+            logger.info("🔧 Usando ConfigLoader - Session file: %s", session_file)
         
         if not os.path.exists(session_file):
             logger.error("❌ Arquivo %s não encontrado", session_file)
