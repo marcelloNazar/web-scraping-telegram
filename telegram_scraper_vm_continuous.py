@@ -199,21 +199,39 @@ def send_message_to_opensearch(message_data, es_client):
         logger.error("❌ Erro OpenSearch: %s", es_error)
         return False
 
-def process_telegram_groups_continuous(client, groups_data, es_client):
-    """Processar grupos Telegram para execução contínua"""
+def process_telegram_groups_continuous(client, groups_data, es_client, execution_count=1):
+    """Processar grupos Telegram para execução contínua com rotação pelos 204 grupos"""
     from telethon.errors import FloodWaitError
+    import time
     
     logger.info("📋 ==> PROCESSANDO GRUPOS DO GOOGLE SHEETS")
-    logger.info("📊 Total grupos a processar: %d", len(groups_data))
+    logger.info("📊 Total grupos disponíveis: %d", len(groups_data))
     
     total_messages = 0
     total_sent_kinesis = 0
     total_sent_opensearch = 0
     classification_stats = {'POL': 0, 'CONSPIRA': 0, 'NAZ': 0, 'OTHER': 0}
     
-    # Para execução contínua, processar até 5 grupos por vez
-    groups_to_process = groups_data[:5]
-    logger.info("📝 Processando %d grupos nesta execução", len(groups_to_process))
+    # Estratégia: Processar 30 grupos por execução com rotação
+    groups_per_execution = 30
+    start_index = ((execution_count - 1) * groups_per_execution) % len(groups_data)
+    end_index = min(start_index + groups_per_execution, len(groups_data))
+    
+    # Se chegou ao final, pegar o resto do começo
+    if end_index == len(groups_data) and start_index + groups_per_execution > len(groups_data):
+        groups_to_process = groups_data[start_index:] + groups_data[:groups_per_execution - (len(groups_data) - start_index)]
+    else:
+        groups_to_process = groups_data[start_index:end_index]
+    
+    logger.info("📝 Processando %d grupos nesta execução (posições %d-%d)", 
+               len(groups_to_process), start_index + 1, 
+               (start_index + len(groups_to_process)) % len(groups_data) if start_index + len(groups_to_process) > len(groups_data) else start_index + len(groups_to_process))
+    
+    # Mostrar ciclo completo
+    total_executions_for_cycle = (len(groups_data) + groups_per_execution - 1) // groups_per_execution
+    current_cycle_position = ((execution_count - 1) % total_executions_for_cycle) + 1
+    logger.info("🔄 Ciclo: %d/%d (todos os %d grupos serão processados em %d execuções)", 
+               current_cycle_position, total_executions_for_cycle, len(groups_data), total_executions_for_cycle)
     
     for i, group_info in enumerate(groups_to_process):
         group_username = group_info.get('username', '')
@@ -226,9 +244,13 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
                    i+1, len(groups_to_process), group_username, group_spectrum)
         
         try:
-            # Buscar últimas mensagens (limite baixo para não ultrapassar rate limits)
-            messages = client.get_messages(group_username, limit=2)
+            # Buscar últimas mensagens (aumentando limite para mais dados)
+            messages = client.get_messages(group_username, limit=3)
             logger.info("📥 Encontradas %d mensagens em %s", len(messages), group_username)
+            
+            # Rate limiting: pausa de 1 segundo entre grupos para evitar flood
+            if i < len(groups_to_process) - 1:  # Não pausar no último
+                time.sleep(1)
             
             for msg in messages:
                 if msg.text and len(msg.text.strip()) > 10:
@@ -328,9 +350,9 @@ def main():
             logger.info("🔄 EXECUÇÃO #%d - %s", execution_count, datetime.now().strftime("%H:%M:%S"))
             logger.info("="*80)
             
-            # Fazer scraping
+            # Fazer scraping com rotação pelos 204 grupos
             messages, kinesis_sent, opensearch_sent, classification_stats = process_telegram_groups_continuous(
-                client, groups_data, es_client
+                client, groups_data, es_client, execution_count
             )
             
             # Atualizar totais
