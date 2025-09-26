@@ -20,6 +20,13 @@ class TelegramConfig:
     phone: str
     username: str
     session_file: str = "telegram_session"
+    
+    def __post_init__(self):
+        """Auto-gerar nome do arquivo de sessão baseado no username"""
+        if self.username and self.session_file == "telegram_session":
+            # Remove @ se presente e adiciona .session
+            clean_username = self.username.replace('@', '')
+            self.session_file = f"{clean_username}.session"
 
 @dataclass
 class AWSConfig:
@@ -44,6 +51,8 @@ class SheetsConfig:
     """Configurações Google Sheets"""
     sheet_url: Optional[str] = None
     cache_duration: int = 300  # 5 minutos
+    chip_filter: Optional[str] = None  # Filtro de chip (ex: "02", "03")
+    sheets_range: Optional[str] = None  # Range de linhas (ex: "1:100", "50:200")
 
 class ConfigLoader:
     """Carregador central de configurações"""
@@ -196,13 +205,17 @@ class ConfigLoader:
 
                 config.sheet_url = sheets_data.get('sheet_url')
                 config.cache_duration = sheets_data.get('cache_duration', 300)
+                config.chip_filter = sheets_data.get('chip_filter')
+                config.sheets_range = sheets_data.get('sheets_range')
 
             except Exception as e:
                 print(f"⚠️ Erro ao carregar sheets_config.json: {e}")
 
-        # Tentar variáveis de ambiente
+        # Tentar variáveis de ambiente (sobrescreve arquivo)
         config.sheet_url = os.getenv('GOOGLE_SHEETS_URL', config.sheet_url)
         config.cache_duration = int(os.getenv('SHEETS_CACHE_DURATION', config.cache_duration))
+        config.chip_filter = os.getenv('CHIP_ID', os.getenv('CHIP_FILTER', config.chip_filter))
+        config.sheets_range = os.getenv('SHEETS_RANGE', config.sheets_range)
 
         return config
 
@@ -219,7 +232,17 @@ class ConfigLoader:
             'api_id': self.telegram_config.api_id,
             'api_hash': self.telegram_config.api_hash,
             'phone': self.telegram_config.phone,
-            'username': self.telegram_config.username
+            'username': self.telegram_config.username,
+            'session_file': self.telegram_config.session_file
+        }
+    
+    def get_sheets_config(self) -> Dict[str, Optional[str]]:
+        """Retorna configurações do Google Sheets como dict"""
+        return {
+            'sheet_url': self.sheets_config.sheet_url,
+            'cache_duration': self.sheets_config.cache_duration,
+            'chip_filter': self.sheets_config.chip_filter,
+            'sheets_range': self.sheets_config.sheets_range
         }
 
     def get_aws_credentials(self) -> Dict[str, Optional[str]]:
@@ -322,6 +345,17 @@ class ConfigLoader:
         print(f"  ☁️  AWS: {'✅' if validation['aws'] else '❌'}")
         print(f"  🔧 Scraping: {'✅' if validation['scraping'] else '❌'}")
         print(f"  📊 Google Sheets: {'✅' if validation['sheets'] else '❌'}")
+        
+        # Detalhes do Telegram
+        if validation['telegram']:
+            print(f"     📱 Username: {self.telegram_config.username}")
+            print(f"     🗂️  Session file: {self.telegram_config.session_file}")
+        
+        # Detalhes do Google Sheets
+        if validation['sheets']:
+            print(f"     🏷️  Chip Filter: {self.sheets_config.chip_filter}")
+            if self.sheets_config.sheets_range:
+                print(f"     📍 Range: {self.sheets_config.sheets_range}")
 
         if not validation['telegram']:
             print("  ⚠️  Configure telegram_credentials.py ou variáveis de ambiente")
