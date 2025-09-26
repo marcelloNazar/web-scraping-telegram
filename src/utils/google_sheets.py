@@ -78,6 +78,52 @@ class GoogleSheetsLoader:
             print("🔄 Usando grupos fallback...")
             return self._get_fallback_groups()
 
+    def _apply_range_filter(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Aplica filtro de range de linhas baseado na configuração SHEETS_RANGE"""
+        try:
+            # Obter configuração de range
+            from .config_loader import load_config
+            config = load_config()
+            sheets_config = config.get_sheets_config()
+            sheets_range = sheets_config.get('sheets_range')
+            
+            if not sheets_range:
+                # Sem filtro configurado, retorna DataFrame completo
+                return df
+            
+            # Parse do range no formato "linha_inicial:linha_final"
+            if ':' in sheets_range:
+                range_parts = sheets_range.split(':')
+                if len(range_parts) == 2:
+                    try:
+                        start_line = int(range_parts[0]) - 1  # Converter para índice 0-based
+                        end_line = int(range_parts[1])  # End é exclusivo no slicing
+                        
+                        # Validar limites
+                        start_line = max(0, start_line)
+                        end_line = min(len(df), end_line)
+                        
+                        if start_line < end_line:
+                            print(f"📍 Aplicando range: linhas {start_line+1} a {end_line} (de {len(df)} total)")
+                            return df.iloc[start_line:end_line]
+                        else:
+                            print(f"⚠️ Range inválido: {sheets_range}, usando DataFrame completo")
+                            return df
+                            
+                    except ValueError as e:
+                        print(f"⚠️ Erro ao parsear range '{sheets_range}': {e}")
+                        return df
+                else:
+                    print(f"⚠️ Formato de range inválido: '{sheets_range}' (use 'inicio:fim')")
+                    return df
+            else:
+                print(f"⚠️ Formato de range inválido: '{sheets_range}' (use 'inicio:fim')")
+                return df
+                
+        except Exception as e:
+            print(f"⚠️ Erro ao aplicar filtro de range: {e}")
+            return df
+
     def _process_dataframe(self, df: pd.DataFrame) -> List[Dict]:
         """Processa DataFrame da planilha e retorna lista de grupos"""
         groups = []
@@ -85,14 +131,27 @@ class GoogleSheetsLoader:
         print(f"📊 DataFrame shape: {df.shape}")
         print(f"📊 Colunas encontradas: {list(df.columns)}")
 
+        # Aplicar filtro de range se configurado
+        df_filtered = self._apply_range_filter(df)
+        
+        print(f"📍 Após filtro de range: {df_filtered.shape[0]} linhas")
+
         # Usar nomes de colunas reais encontrados:
         # 'To Scrape', 'Url', 'Group', 'Project', 'Country', 'Format', 'Spectrum', 'Stance', 'Identity', 'Basis', 'Territory', 'Name', 'Description', 'Users', 'To Categorize', 'Chip', '2025-07'
 
-        for index, row in df.iterrows():
+        for index, row in df_filtered.iterrows():
             try:
-                # Filtrar apenas grupos do chip 2 ('02' ou '2')
+                # Filtrar grupos baseado na configuração de chip (CHIP_ID)
                 chip = str(row.get('Chip', '')).strip()
-                if chip not in ['02', '2']:
+                
+                # Obter filtro de chip das configurações
+                from .config_loader import load_config
+                config = load_config()
+                sheets_config = config.get_sheets_config()
+                chip_filter = sheets_config.get('chip_filter', '02')  # Default para chip 2
+                
+                # Verificar se o chip corresponde ao filtro configurado
+                if chip not in [chip_filter, chip_filter.zfill(2), chip_filter.lstrip('0')]:
                     continue
 
                 # Extrair username do campo 'Group'
