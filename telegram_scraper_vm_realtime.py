@@ -248,12 +248,17 @@ async def setup_realtime_monitoring(groups_data):
         logger.error("❌ Configuração inválida")
         return None
     
-    # Criar cliente Telethon
-    session_file = 'ergoncugler_cinco.session'
+    # Criar cliente Telethon usando ConfigLoader
+    from src.utils.config_loader import load_config
+    config_loader = load_config()
+    telegram_creds = config_loader.get_telegram_credentials()
+    session_file = telegram_creds['session_file']
+    
     if not os.path.exists(session_file):
         logger.error("❌ Arquivo %s não encontrado", session_file)
         return None
     
+    logger.info("🔧 Usando session file: %s", session_file)
     client = TelegramClient(session_file, int(config['api_id']), config['api_hash'])
     
     try:
