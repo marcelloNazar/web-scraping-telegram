@@ -95,12 +95,30 @@ class ConfigLoader:
             self._load_default_configs()
 
     def _load_telegram_config(self) -> TelegramConfig:
-        """Carrega configurações do Telegram"""
-        # Tentar carregar do arquivo Python
+        """Carrega configurações do Telegram - PRIORIDADE: Variáveis de Ambiente"""
+        # PRIMEIRO: Tentar variáveis de ambiente (PRIORIDADE)
+        api_id = os.getenv('TELEGRAM_API_ID')
+        api_hash = os.getenv('TELEGRAM_API_HASH')
+        phone = os.getenv('TELEGRAM_PHONE')
+        username = os.getenv('TELEGRAM_USERNAME')
+
+        if all([api_id, api_hash, phone, username]):
+            print(f"✅ Configurações Telegram carregadas das VARIÁVEIS DE AMBIENTE")
+            print(f"   📱 Username: {username}")
+            print(f"   📞 Phone: {phone}")
+            return TelegramConfig(
+                api_id=api_id,
+                api_hash=api_hash,
+                phone=phone,
+                username=username
+            )
+
+        # SEGUNDO: Fallback para arquivo Python (se variáveis não existirem)
         try:
             sys.path.insert(0, str(self.config_dir))
             import telegram_credentials as telegram_creds
 
+            print(f"⚠️ Usando arquivo telegram_credentials.py (fallback)")
             return TelegramConfig(
                 api_id=telegram_creds.api_id,
                 api_hash=telegram_creds.api_hash,
@@ -110,20 +128,6 @@ class ConfigLoader:
 
         except ImportError:
             print("⚠️ Arquivo telegram_credentials.py não encontrado")
-
-        # Tentar variáveis de ambiente
-        api_id = os.getenv('TELEGRAM_API_ID')
-        api_hash = os.getenv('TELEGRAM_API_HASH')
-        phone = os.getenv('TELEGRAM_PHONE')
-        username = os.getenv('TELEGRAM_USERNAME')
-
-        if all([api_id, api_hash, phone, username]):
-            return TelegramConfig(
-                api_id=api_id,
-                api_hash=api_hash,
-                phone=phone,
-                username=username
-            )
 
         # Configuração padrão (vazia)
         print("❌ Configurações do Telegram não encontradas")
