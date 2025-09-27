@@ -9,7 +9,7 @@ import boto3
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import logging
 import traceback
 import signal
@@ -175,6 +175,34 @@ def classify_message(text):
     else:
         return 'OTHER'
 
+def load_state():
+    """Carregar estado de última mensagem processada por grupo"""
+    state_file = 'telegram_scraper_state.json'
+    try:
+        if os.path.exists(state_file):
+            with open(state_file, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+                logger.info("📄 Estado carregado: %d grupos com histórico", len(state))
+                return state
+        else:
+            logger.info("📄 Primeiro uso - criando novo arquivo de estado")
+            return {}
+    except Exception as e:
+        logger.error("❌ Erro ao carregar estado: %s", e)
+        return {}
+
+def save_state(state):
+    """Salvar estado de última mensagem processada por grupo"""
+    state_file = 'telegram_scraper_state.json'
+    try:
+        with open(state_file, 'w', encoding='utf-8') as f:
+            json.dump(state, f, indent=2, ensure_ascii=False)
+        logger.info("💾 Estado salvo com %d grupos", len(state))
+        return True
+    except Exception as e:
+        logger.error("❌ Erro ao salvar estado: %s", e)
+        return False
+
 def get_partition_key_optimized(group_name, message_id):
     """Gerar chave de partição otimizada para distribuição uniforme entre shards"""
     # Usar grupo + hash do message_id para distribuição uniforme
@@ -288,8 +316,8 @@ def send_message_to_opensearch(message_data, es_client):
         logger.error("❌ Erro OpenSearch: %s", es_error)
         return False
 
-def process_telegram_groups_continuous(client, groups_data, es_client, execution_count=1):
-    """Processar grupos Telegram para execução contínua com rotação pelos 204 grupos"""
+def process_telegram_groups_continuous(client, groups_data, es_client):
+    """Processar grupos Telegram para execução contínua com controle de estado (sem duplicatas)"""
     from telethon.errors import FloodWaitError
     import time
     
@@ -304,11 +332,15 @@ def process_telegram_groups_continuous(client, groups_data, es_client, execution
     # Buffer para batch Kinesis otimizado (AWS Best Practices)
     kinesis_batch = []
     
+    # Carregar estado para evitar duplicatas
+    state = load_state()
+    
     # Estratégia: Processar TODOS os grupos por execução (máxima cobertura)
     groups_to_process = groups_data  # Processar todos os grupos
     
     logger.info("📝 Processando TODOS os %d grupos nesta execução", len(groups_to_process))
-    logger.info("🔄 Estratégia: Cobertura completa de todos os grupos a cada 2 minutos")
+    logger.info("🔄 Estratégia: Cobertura completa com controle de estado (sem duplicatas)")
+    logger.info("📄 Estado atual: %d grupos com histórico", len(state))
     
     for i, group_info in enumerate(groups_to_process):
         group_username = group_info.get('username', '')
@@ -321,17 +353,36 @@ def process_telegram_groups_continuous(client, groups_data, es_client, execution
                    i+1, len(groups_to_process), group_username, group_spectrum)
         
         try:
-            # Buscar últimas mensagens (limite aumentado para máxima cobertura)
-            messages = client.get_messages(group_username, limit=10)
-            logger.info("📥 Encontradas %d mensagens em %s", len(messages), group_username)
+            # Controle de estado: evitar duplicatas usando min_id ou offset_date
+            group_state = state.get(group_username, {})
+            last_message_id = group_state.get('last_message_id')
+            
+            if last_message_id:
+                # Usar min_id para pegar apenas mensagens NOVAS (AWS Best Practice)
+                messages = client.get_messages(group_username, min_id=last_message_id)
+                logger.info("📥 [INCREMENTAL] %d mensagens novas em %s (min_id=%s)", 
+                           len(messages), group_username, last_message_id)
+            else:
+                # Primeira execução: pegar últimas 3 horas para catch-up inicial
+                offset_date = datetime.now(timezone.utc) - timedelta(hours=3)
+                messages = client.get_messages(group_username, offset_date=offset_date)
+                logger.info("📥 [PRIMEIRA VEZ] %d mensagens últimas 3h em %s", 
+                           len(messages), group_username)
             
             # Rate limiting: pausa menor para processar 200 grupos eficientemente
             if i < len(groups_to_process) - 1:  # Não pausar no último
                 time.sleep(0.5)  # 0.5s = 200 grupos em ~2 minutos
             
+            # Atualizar estado com último message_id processado
+            newest_message_id = None
+            
             for msg in messages:
                 if msg.text and len(msg.text.strip()) > 10:
                     total_messages += 1
+                    
+                    # Rastrear message_id mais recente
+                    if newest_message_id is None or msg.id > newest_message_id:
+                        newest_message_id = msg.id
                     
                     # Classificar mensagem
                     classification = classify_message(msg.text)
@@ -359,6 +410,15 @@ def process_telegram_groups_continuous(client, groups_data, es_client, execution
                         total_sent_opensearch += 1
                         logger.info("🔍 ✅ OpenSearch: %s | %s", group_username, classification)
             
+            # Atualizar estado apenas se processou mensagens
+            if newest_message_id is not None:
+                state[group_username] = {
+                    'last_message_id': newest_message_id,
+                    'last_processed_at': datetime.now(timezone.utc).isoformat(),
+                    'total_processed': len(messages)
+                }
+                logger.info("📄 Estado atualizado para %s: last_id=%s", group_username, newest_message_id)
+            
         except FloodWaitError as flood_error:
             logger.warning("⏳ Rate limit para %s: aguardar %ds", group_username, flood_error.seconds)
             continue
@@ -378,11 +438,18 @@ def process_telegram_groups_continuous(client, groups_data, es_client, execution
         else:
             logger.info("✅ Kinesis Batch Final: todas as %d mensagens enviadas com sucesso", sent_count)
     
+    # Salvar estado atualizado (crítico para evitar duplicatas)
+    if save_state(state):
+        logger.info("💾 Estado salvo com sucesso - próximas execuções serão incrementais")
+    else:
+        logger.warning("⚠️ Falha ao salvar estado - pode haver duplicatas na próxima execução")
+    
     logger.info("📊 ESTATÍSTICAS DESTA EXECUÇÃO:")
     logger.info("📱 Total mensagens: %d", total_messages)
     logger.info("📡 Kinesis enviadas: %d", total_sent_kinesis)
     logger.info("🔍 OpenSearch enviadas: %d", total_sent_opensearch)
     logger.info("📈 Classificações: %s", classification_stats)
+    logger.info("📄 Grupos com estado atualizado: %d", len(state))
     
     return total_messages, total_sent_kinesis, total_sent_opensearch, classification_stats
 
@@ -436,9 +503,9 @@ def main():
             logger.info("🔄 EXECUÇÃO #%d - %s", execution_count, datetime.now().strftime("%H:%M:%S"))
             logger.info("="*80)
             
-            # Fazer scraping com rotação pelos 204 grupos
+            # Fazer scraping com rotação pelos 200 grupos (com controle de estado)
             messages, kinesis_sent, opensearch_sent, classification_stats = process_telegram_groups_continuous(
-                client, groups_data, es_client, execution_count
+                client, groups_data, es_client
             )
             
             # Atualizar totais
