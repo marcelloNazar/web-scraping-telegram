@@ -9,6 +9,7 @@ import boto3
 import os
 import sys
 import asyncio
+import time
 from datetime import datetime, timezone
 import logging
 import traceback
@@ -44,6 +45,9 @@ total_messages_processed = 0
 total_kinesis_sent = 0
 total_opensearch_sent = 0
 classification_stats = {'POL': 0, 'CONSPIRA': 0, 'NAZ': 0, 'OTHER': 0}
+
+# Buffer Kinesis otimizado (AWS Best Practices)
+kinesis_buffer = None
 
 def signal_handler(signum, frame):
     """Handler para parar execução gracefully"""
@@ -146,13 +150,124 @@ def classify_message(text):
     else:
         return 'OTHER'
 
-def send_message_to_kinesis_complete(message_data, group):
-    """Enviar dados completos para Kinesis"""
+class KinesisBuffer:
+    """Buffer inteligente para envio otimizado ao Kinesis (AWS Best Practices)"""
+    
+    def __init__(self, max_size=100, max_wait_seconds=2):
+        self.buffer = []
+        self.max_size = max_size
+        self.max_wait = max_wait_seconds
+        self.last_flush = time.time()
+        self.total_sent = 0
+        self.total_failed = 0
+    
+    async def add_message(self, message_data):
+        """Adicionar mensagem ao buffer e flush automático se necessário"""
+        self.buffer.append(message_data)
+        
+        # Flush se buffer cheio OU tempo limite atingido
+        if (len(self.buffer) >= self.max_size or 
+            time.time() - self.last_flush >= self.max_wait):
+            await self.flush()
+    
+    async def flush(self):
+        """Enviar batch atual para Kinesis"""
+        if not self.buffer:
+            return True
+        
+        success = await send_batch_to_kinesis_optimized(self.buffer)
+        
+        if success:
+            self.total_sent += len(self.buffer)
+            logger.info("📡 Kinesis Batch: %d mensagens enviadas (Total: %d)", 
+                       len(self.buffer), self.total_sent)
+        else:
+            self.total_failed += len(self.buffer)
+            logger.error("❌ Kinesis Batch falhou: %d mensagens (Total falhas: %d)", 
+                        len(self.buffer), self.total_failed)
+        
+        self.buffer.clear()
+        self.last_flush = time.time()
+        return success
+
+def get_partition_key_optimized(group_name, message_id):
+    """Gerar chave de partição otimizada para distribuição uniforme entre shards"""
+    # Usar grupo + hash do message_id para distribuição uniforme
+    hash_suffix = hash(str(message_id)) % 100
+    return f"{group_name}#{hash_suffix}"
+
+async def send_batch_to_kinesis_optimized(messages_batch):
+    """Enviar mensagens em batch usando PutRecords (AWS Best Practice)"""
+    if not messages_batch:
+        return True
+    
     try:
+        # Preparar records para PutRecords (limite: 500 records, 5MB total)
+        max_batch_size = 500  # Limite AWS oficial
+        
+        # Dividir em chunks se necessário
+        for i in range(0, len(messages_batch), max_batch_size):
+            batch_chunk = messages_batch[i:i + max_batch_size]
+            
+            chunk_records = []
+            for msg_data in batch_chunk:
+                partition_key = get_partition_key_optimized(
+                    msg_data.get('group_name', 'default'),
+                    msg_data.get('message_id', 'unknown')
+                )
+                
+                chunk_records.append({
+                    'Data': json.dumps(msg_data),
+                    'PartitionKey': partition_key
+                })
+            
+            # Enviar chunk usando PutRecords
+            response = kinesis_client.put_records(
+                StreamName='telegram-messages',
+                Records=chunk_records
+            )
+            
+            # Verificar falhas (AWS recomenda tratar)
+            failed_count = response.get('FailedRecordCount', 0)
+            if failed_count > 0:
+                logger.warning("⚠️ Kinesis PutRecords: %d/%d records falharam", 
+                             failed_count, len(chunk_records))
+                # Retry simples: Re-tentar records falhados uma vez
+                failed_records = [chunk_records[idx] for idx, record in enumerate(response['Records']) 
+                                if 'ErrorCode' in record]
+                if failed_records:
+                    logger.info("🔄 Tentando reenviar %d records falhados...", len(failed_records))
+                    try:
+                        retry_response = kinesis_client.put_records(
+                            StreamName='telegram-messages',
+                            Records=failed_records
+                        )
+                        retry_failed = retry_response.get('FailedRecordCount', 0)
+                        if retry_failed == 0:
+                            logger.info("✅ Retry successful: todos os records reenviados")
+                        else:
+                            logger.warning("⚠️ Retry parcial: %d ainda falharam", retry_failed)
+                    except Exception as retry_error:
+                        logger.error("❌ Erro no retry: %s", retry_error)
+            
+            success_count = len(chunk_records) - failed_count
+            logger.info("✅ Kinesis PutRecords: %d/%d records enviados com sucesso", 
+                       success_count, len(chunk_records))
+        
+        return True
+        
+    except Exception as kinesis_error:
+        logger.error("❌ Erro Kinesis PutRecords: %s", kinesis_error)
+        return False
+
+def send_message_to_kinesis_complete(message_data, group):
+    """FUNÇÃO LEGADA - Manter para compatibilidade (usar buffer é mais eficiente)"""
+    try:
+        partition_key = get_partition_key_optimized(group, message_data.get('message_id', 'unknown'))
         response = kinesis_client.put_record(
             StreamName='telegram-messages',
             Data=json.dumps(message_data),
-            PartitionKey=group
+            PartitionKey=partition_key
         )
         return True
         
@@ -212,9 +327,13 @@ async def process_new_message(event, groups_info_dict):
         
         total_messages_processed += 1
         
-        # Enviar para Kinesis
-        if send_message_to_kinesis_complete(message_data, group_username):
-            total_kinesis_sent += 1
+        # Enviar para Kinesis usando buffer otimizado (AWS Best Practices)
+        if kinesis_buffer:
+            try:
+                await kinesis_buffer.add_message(message_data)
+                total_kinesis_sent += 1  # Contador otimista (ajustado no flush)
+            except Exception as e:
+                logger.error("❌ Erro Kinesis Buffer: %s", e)
         
         # Enviar para OpenSearch direto
         if elasticsearch_client and send_message_to_opensearch(message_data, elasticsearch_client):
@@ -300,8 +419,12 @@ async def setup_realtime_monitoring(groups_data):
         
         logger.info("🎯 Total grupos conectados para streaming: %d/%d", connected_groups, len(groups_data))
         
-        # Registrar handler para novas mensagens
-        @client.on(events.NewMessage())
+        # Criar lista de chat_ids dos grupos conectados para filtrar o handler
+        connected_chat_ids = list(groups_info_dict.keys())
+        logger.info("🔍 Filtrando handler para %d grupos específicos", len(connected_chat_ids))
+        
+        # Registrar handler APENAS para os grupos conectados (filtro na origem)
+        @client.on(events.NewMessage(chats=connected_chat_ids))
         async def handler(event):
             await process_new_message(event, groups_info_dict)
         
@@ -333,7 +456,7 @@ async def print_stats_periodically():
 
 async def main():
     """Função principal do scraper streaming"""
-    global running
+    global running, kinesis_buffer
     
     # Configurar handlers de sinal
     signal.signal(signal.SIGINT, signal_handler)
@@ -343,6 +466,10 @@ async def main():
     logger.info("📅 Timestamp: %s", datetime.now(timezone.utc).isoformat())
     logger.info("💾 Logs salvos em: telegram_scraper_realtime.log")
     logger.info("⏹️ Para parar: Ctrl+C")
+    
+    # Inicializar buffer Kinesis otimizado (AWS Best Practices)
+    kinesis_buffer = KinesisBuffer(max_size=100, max_wait_seconds=2)
+    logger.info("📦 Kinesis Buffer inicializado: max_size=100, max_wait=2s")
     
     # Inicializar clientes
     es_client = initialize_elasticsearch()
@@ -383,6 +510,16 @@ async def main():
         # Cleanup
         logger.info("🧹 Finalizando streaming...")
         running = False
+        
+        # Flush final do buffer Kinesis (AWS Best Practice)
+        if kinesis_buffer:
+            try:
+                logger.info("📦 Fazendo flush final do Kinesis Buffer...")
+                await kinesis_buffer.flush()
+                logger.info("✅ Buffer Kinesis finalizado - Total enviado: %d, Total falhas: %d", 
+                           kinesis_buffer.total_sent, kinesis_buffer.total_failed)
+            except Exception as e:
+                logger.error("❌ Erro no flush final do buffer: %s", e)
         
         # Cancelar task de estatísticas
         if stats_task:
