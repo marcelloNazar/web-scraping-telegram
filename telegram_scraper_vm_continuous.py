@@ -175,13 +175,96 @@ def classify_message(text):
     else:
         return 'OTHER'
 
-def send_message_to_kinesis_complete(message_data, group):
-    """Enviar dados completos para Kinesis"""
+def get_partition_key_optimized(group_name, message_id):
+    """Gerar chave de partição otimizada para distribuição uniforme entre shards"""
+    # Usar grupo + hash do message_id para distribuição uniforme
+    hash_suffix = hash(str(message_id)) % 100
+    return f"{group_name}#{hash_suffix}"
+
+def send_batch_to_kinesis_optimized(messages_batch):
+    """Enviar mensagens em batch usando PutRecords (AWS Best Practice)"""
+    if not messages_batch:
+        return 0, 0
+    
+    total_sent = 0
+    total_failed = 0
+    
     try:
-        response = kinesis_client.put_record(
+        # Preparar records para PutRecords (limite: 500 records, 5MB total)
+        max_batch_size = 500  # Limite AWS oficial
+        
+        # Dividir em chunks se necessário
+        for i in range(0, len(messages_batch), max_batch_size):
+            batch_chunk = messages_batch[i:i + max_batch_size]
+            
+            chunk_records = []
+            for msg_data in batch_chunk:
+                partition_key = get_partition_key_optimized(
+                    msg_data.get('group_name', 'default'),
+                    msg_data.get('message_id', 'unknown')
+                )
+                
+                chunk_records.append({
+                    'Data': json.dumps(msg_data),
+                    'PartitionKey': partition_key
+                })
+            
+            # Enviar chunk usando PutRecords
+            response = kinesis_client.put_records(
+                StreamName='telegram-messages',
+                Records=chunk_records
+            )
+            
+            # Verificar falhas (AWS recomenda tratar)
+            failed_count = response.get('FailedRecordCount', 0)
+            success_count = len(chunk_records) - failed_count
+            
+            total_sent += success_count
+            total_failed += failed_count
+            
+            if failed_count > 0:
+                logger.warning("⚠️ Kinesis PutRecords: %d/%d records falharam", 
+                             failed_count, len(chunk_records))
+                # Retry simples: Re-tentar records falhados uma vez
+                failed_records = [chunk_records[idx] for idx, record in enumerate(response['Records']) 
+                                if 'ErrorCode' in record]
+                if failed_records:
+                    logger.info("🔄 Tentando reenviar %d records falhados...", len(failed_records))
+                    try:
+                        retry_response = kinesis_client.put_records(
+                            StreamName='telegram-messages',
+                            Records=failed_records
+                        )
+                        retry_failed = retry_response.get('FailedRecordCount', 0)
+                        if retry_failed == 0:
+                            logger.info("✅ Retry successful: todos os records reenviados")
+                            total_sent += len(failed_records)  # Somar records que foram reenviados com sucesso
+                            total_failed -= len(failed_records)  # Reduzir dos falhados
+                        else:
+                            logger.warning("⚠️ Retry parcial: %d ainda falharam", retry_failed)
+                            retry_success = len(failed_records) - retry_failed
+                            total_sent += retry_success
+                            total_failed -= retry_success
+                    except Exception as retry_error:
+                        logger.error("❌ Erro no retry: %s", retry_error)
+            
+            logger.info("✅ Kinesis PutRecords: %d/%d records enviados com sucesso", 
+                       success_count, len(chunk_records))
+        
+        return total_sent, total_failed
+        
+    except Exception as kinesis_error:
+        logger.error("❌ Erro Kinesis PutRecords: %s", kinesis_error)
+        return 0, len(messages_batch)
+
+def send_message_to_kinesis_complete(message_data, group):
+    """FUNÇÃO LEGADA - Manter para compatibilidade (usar batch é mais eficiente)"""
+    try:
+        partition_key = get_partition_key_optimized(group, message_data.get('message_id', 'unknown'))
+        kinesis_client.put_record(
             StreamName='telegram-messages',
             Data=json.dumps(message_data),
-            PartitionKey=group
+            PartitionKey=partition_key
         )
         return True
         
@@ -218,26 +301,14 @@ def process_telegram_groups_continuous(client, groups_data, es_client, execution
     total_sent_opensearch = 0
     classification_stats = {'POL': 0, 'CONSPIRA': 0, 'NAZ': 0, 'OTHER': 0}
     
-    # Estratégia: Processar 30 grupos por execução com rotação
-    groups_per_execution = 30
-    start_index = ((execution_count - 1) * groups_per_execution) % len(groups_data)
-    end_index = min(start_index + groups_per_execution, len(groups_data))
+    # Buffer para batch Kinesis otimizado (AWS Best Practices)
+    kinesis_batch = []
     
-    # Se chegou ao final, pegar o resto do começo
-    if end_index == len(groups_data) and start_index + groups_per_execution > len(groups_data):
-        groups_to_process = groups_data[start_index:] + groups_data[:groups_per_execution - (len(groups_data) - start_index)]
-    else:
-        groups_to_process = groups_data[start_index:end_index]
+    # Estratégia: Processar TODOS os grupos por execução (máxima cobertura)
+    groups_to_process = groups_data  # Processar todos os grupos
     
-    logger.info("📝 Processando %d grupos nesta execução (posições %d-%d)", 
-               len(groups_to_process), start_index + 1, 
-               (start_index + len(groups_to_process)) % len(groups_data) if start_index + len(groups_to_process) > len(groups_data) else start_index + len(groups_to_process))
-    
-    # Mostrar ciclo completo
-    total_executions_for_cycle = (len(groups_data) + groups_per_execution - 1) // groups_per_execution
-    current_cycle_position = ((execution_count - 1) % total_executions_for_cycle) + 1
-    logger.info("🔄 Ciclo: %d/%d (todos os %d grupos serão processados em %d execuções)", 
-               current_cycle_position, total_executions_for_cycle, len(groups_data), total_executions_for_cycle)
+    logger.info("📝 Processando TODOS os %d grupos nesta execução", len(groups_to_process))
+    logger.info("🔄 Estratégia: Cobertura completa de todos os grupos a cada 2 minutos")
     
     for i, group_info in enumerate(groups_to_process):
         group_username = group_info.get('username', '')
@@ -250,13 +321,13 @@ def process_telegram_groups_continuous(client, groups_data, es_client, execution
                    i+1, len(groups_to_process), group_username, group_spectrum)
         
         try:
-            # Buscar últimas mensagens (aumentando limite para mais dados)
-            messages = client.get_messages(group_username, limit=3)
+            # Buscar últimas mensagens (limite aumentado para máxima cobertura)
+            messages = client.get_messages(group_username, limit=10)
             logger.info("📥 Encontradas %d mensagens em %s", len(messages), group_username)
             
-            # Rate limiting: pausa de 1 segundo entre grupos para evitar flood
+            # Rate limiting: pausa menor para processar 200 grupos eficientemente
             if i < len(groups_to_process) - 1:  # Não pausar no último
-                time.sleep(1)
+                time.sleep(0.5)  # 0.5s = 200 grupos em ~2 minutos
             
             for msg in messages:
                 if msg.text and len(msg.text.strip()) > 10:
@@ -280,10 +351,8 @@ def process_telegram_groups_continuous(client, groups_data, es_client, execution
                         'indexed_at': datetime.now(timezone.utc).isoformat()
                     }
                     
-                    # Enviar para Kinesis
-                    if send_message_to_kinesis_complete(message_data, group_username):
-                        total_sent_kinesis += 1
-                        logger.info("📡 ✅ Kinesis: %s | %s", group_username, classification)
+                    # Adicionar ao batch Kinesis (AWS Best Practice - envio em lote)
+                    kinesis_batch.append(message_data)
                     
                     # Enviar para OpenSearch direto
                     if es_client and send_message_to_opensearch(message_data, es_client):
@@ -297,6 +366,17 @@ def process_telegram_groups_continuous(client, groups_data, es_client, execution
         except Exception as group_error:
             logger.error("❌ Erro no grupo %s: %s", group_username, group_error)
             continue
+    
+    # Enviar batch Kinesis ao final (AWS Best Practice)
+    if kinesis_batch:
+        logger.info("📦 Enviando batch Kinesis: %d mensagens acumuladas", len(kinesis_batch))
+        sent_count, failed_count = send_batch_to_kinesis_optimized(kinesis_batch)
+        total_sent_kinesis = sent_count
+        
+        if failed_count > 0:
+            logger.warning("⚠️ Kinesis Batch Final: %d falharam, %d enviadas", failed_count, sent_count)
+        else:
+            logger.info("✅ Kinesis Batch Final: todas as %d mensagens enviadas com sucesso", sent_count)
     
     logger.info("📊 ESTATÍSTICAS DESTA EXECUÇÃO:")
     logger.info("📱 Total mensagens: %d", total_messages)

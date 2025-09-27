@@ -264,7 +264,7 @@ def send_message_to_kinesis_complete(message_data, group):
     """FUNÇÃO LEGADA - Manter para compatibilidade (usar buffer é mais eficiente)"""
     try:
         partition_key = get_partition_key_optimized(group, message_data.get('message_id', 'unknown'))
-        response = kinesis_client.put_record(
+        kinesis_client.put_record(
             StreamName='telegram-messages',
             Data=json.dumps(message_data),
             PartitionKey=partition_key
