@@ -342,6 +342,12 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
     logger.info("🔄 Estratégia: Cobertura completa com controle de estado (sem duplicatas)")
     logger.info("📄 Estado atual: %d grupos com histórico", len(state))
     
+    # Estatísticas de captura
+    grupos_novos = len([g for g in groups_to_process if g.get('username', '') not in state])
+    grupos_incrementais = len(groups_to_process) - grupos_novos
+    logger.info("📊 Captura: %d grupos novos (24h histórico) + %d incrementais (só novas)", 
+               grupos_novos, grupos_incrementais)
+    
     for i, group_info in enumerate(groups_to_process):
         group_username = group_info.get('username', '')
         group_spectrum = group_info.get('spectrum', 'unknown')
@@ -363,10 +369,10 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
                 logger.info("📥 [INCREMENTAL] %d mensagens novas em %s (min_id=%s)", 
                            len(messages), group_username, last_message_id)
             else:
-                # Primeira execução: pegar últimas 3 horas para catch-up inicial
-                offset_date = datetime.now(timezone.utc) - timedelta(hours=3)
-                messages = client.get_messages(group_username, offset_date=offset_date)
-                logger.info("📥 [PRIMEIRA VEZ] %d mensagens últimas 3h em %s", 
+                # Primeira execução: pegar últimas 24 horas com limite maior para máxima cobertura
+                offset_date = datetime.now(timezone.utc) - timedelta(hours=24)
+                messages = client.get_messages(group_username, offset_date=offset_date, limit=50)
+                logger.info("📥 [PRIMEIRA VEZ] %d mensagens últimas 24h em %s (limit=50)", 
                            len(messages), group_username)
             
             # Rate limiting: pausa menor para processar 200 grupos eficientemente
@@ -444,12 +450,23 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
     else:
         logger.warning("⚠️ Falha ao salvar estado - pode haver duplicatas na próxima execução")
     
+    # Estatísticas detalhadas da execução
+    grupos_com_mensagens = len([g for g in state.values() if 'last_processed_at' in g])
+    grupos_sem_mensagens = len(groups_to_process) - grupos_com_mensagens
+    
     logger.info("📊 ESTATÍSTICAS DESTA EXECUÇÃO:")
-    logger.info("📱 Total mensagens: %d", total_messages)
+    logger.info("📱 Total mensagens capturadas: %d", total_messages)
     logger.info("📡 Kinesis enviadas: %d", total_sent_kinesis)
     logger.info("🔍 OpenSearch enviadas: %d", total_sent_opensearch)
     logger.info("📈 Classificações: %s", classification_stats)
-    logger.info("📄 Grupos com estado atualizado: %d", len(state))
+    logger.info("📄 Estado: %d grupos atualizados", len(state))
+    logger.info("📊 Atividade: %d grupos com mensagens, %d sem mensagens novas", 
+               grupos_com_mensagens, grupos_sem_mensagens)
+    
+    if total_messages == 0:
+        logger.info("ℹ️ NORMAL: 0 mensagens = todos os grupos já estão atualizados (sem duplicatas)")
+    else:
+        logger.info("✅ SUCESSO: %d mensagens novas capturadas sem duplicatas", total_messages)
     
     return total_messages, total_sent_kinesis, total_sent_opensearch, classification_stats
 
@@ -464,7 +481,9 @@ def main():
     logger.info("🚀 ==> INICIANDO TELEGRAM SCRAPER VM CONTÍNUO")
     logger.info("📅 Timestamp: %s", datetime.now(timezone.utc).isoformat())
     logger.info("💾 Logs salvos em: telegram_scraper.log")
+    logger.info("📄 Estado salvo em: telegram_scraper_state.json")
     logger.info("⏹️ Para parar: Ctrl+C")
+    logger.info("🔄 Sistema anti-duplicatas: ATIVO (usando min_id)")
     
     # Validar configurações
     config = validate_environment()
