@@ -653,7 +653,7 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
     # DEBUG: Contadores detalhados para diagnóstico
     debug_counts = {
         'messages_api_total': 0,      # Total de mensagens da API
-        'messages_filtered_out': 0,   # Mensagens filtradas (texto muito curto)
+        'messages_filtered_out': 0,   # Mensagens filtradas (texto < 2 chars)
         'messages_added_kinesis': 0,  # Mensagens adicionadas ao buffer Kinesis
         'messages_added_opensearch': 0,  # Mensagens adicionadas ao buffer OpenSearch
         'opensearch_batches_sent': 0,    # Número de batches OpenSearch enviados
@@ -727,8 +727,8 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
                 # Contar todas as mensagens da API
                 debug_counts['messages_api_total'] += 1
                 
-                # FILTRO RELAXADO: aceitar mensagens com 3+ caracteres (antes era 10)
-                if msg.text and len(msg.text.strip()) > 3:
+                # FILTRO RELAXADO: aceitar mensagens com 2+
+                if msg.text and len(msg.text.strip()) > 1:
                     total_messages += 1
                     messages_processed_count += 1
                     
@@ -930,7 +930,7 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
     logger.info("🔍 DEBUG - FLUXO DETALHADO DE MENSAGENS:")
     logger.info("="*80)
     logger.info("📡 Mensagens da API total: %d", debug_counts['messages_api_total'])
-    logger.info("⛔ Mensagens filtradas (texto < 3 chars): %d", debug_counts['messages_filtered_out'])
+    logger.info("⛔ Mensagens filtradas (texto < 2 chars): %d", debug_counts['messages_filtered_out'])
     logger.info("📦 Mensagens adicionadas ao buffer Kinesis: %d", debug_counts['messages_added_kinesis'])
     logger.info("📦 Mensagens adicionadas ao buffer OpenSearch: %d", debug_counts['messages_added_opensearch'])
     logger.info("🚀 Batches OpenSearch enviados: %d", debug_counts['opensearch_batches_sent'])
