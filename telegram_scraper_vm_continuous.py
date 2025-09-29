@@ -650,6 +650,16 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
     OPENSEARCH_BATCH_SIZE = 50   # Mensagens por batch (menor para estabilidade)
     OPENSEARCH_DELAY = 3.0       # Segundos entre batches (rate limiting conservador)
     
+    # DEBUG: Contadores detalhados para diagnóstico
+    debug_counts = {
+        'messages_api_total': 0,      # Total de mensagens da API
+        'messages_filtered_out': 0,   # Mensagens filtradas (texto muito curto)
+        'messages_added_kinesis': 0,  # Mensagens adicionadas ao buffer Kinesis
+        'messages_added_opensearch': 0,  # Mensagens adicionadas ao buffer OpenSearch
+        'opensearch_batches_sent': 0,    # Número de batches OpenSearch enviados
+        'opensearch_intermediate_sent': 0  # Mensagens enviadas em batches intermediários
+    }
+    
     # Carregar estado para evitar duplicatas
     state = load_state()
     
@@ -714,6 +724,9 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
             logger.info("🔍 DEBUG: Processando %d mensagens de %s...", len(messages), group_username)
             
             for msg in messages:
+                # Contar todas as mensagens da API
+                debug_counts['messages_api_total'] += 1
+                
                 # FILTRO RELAXADO: aceitar mensagens com 3+ caracteres (antes era 10)
                 if msg.text and len(msg.text.strip()) > 3:
                     total_messages += 1
@@ -789,34 +802,43 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
                     
                     # Adicionar ao batch Kinesis (AWS Best Practice - envio em lote)
                     kinesis_batch.append(message_data)
+                    debug_counts['messages_added_kinesis'] += 1
                     
                     # Adicionar ao batch OpenSearch (AWS Best Practice - bulk requests)
-                    if es_client:
+                    if es_client and hasattr(es_client, 'enabled') and es_client.enabled:
                         opensearch_batch.append(message_data)
+                        debug_counts['messages_added_opensearch'] += 1
                         logger.debug("📦 OpenSearch batch: %s | %s | MSG_%s (batch size: %d)", 
                                    group_username, classification, msg.id, len(opensearch_batch))
                         
                         # Enviar batch quando atingir tamanho máximo
                         if len(opensearch_batch) >= OPENSEARCH_BATCH_SIZE:
-                            logger.info("🚀 Enviando batch OpenSearch: %d mensagens acumuladas", len(opensearch_batch))
+                            logger.info("🚀 BATCH INTERMEDIÁRIO OpenSearch: %d mensagens acumuladas", len(opensearch_batch))
                             success_count, failed_items = send_batch_to_opensearch_bulk(opensearch_batch, es_client)
                             total_sent_opensearch += success_count
+                            debug_counts['opensearch_batches_sent'] += 1
+                            debug_counts['opensearch_intermediate_sent'] += success_count
                             
                             if failed_items:
-                                logger.warning("⚠️ Batch OpenSearch: %d/%d falharam", len(failed_items), len(opensearch_batch))
+                                logger.warning("⚠️ Batch Intermediário OpenSearch: %d/%d falharam", len(failed_items), len(opensearch_batch))
                             else:
-                                logger.info("✅ Batch OpenSearch: %d/%d sucessos", success_count, len(opensearch_batch))
+                                logger.info("✅ Batch Intermediário OpenSearch: %d/%d sucessos", success_count, len(opensearch_batch))
                             
                             # Reset batch e delay para rate limiting
                             opensearch_batch = []
                             time.sleep(OPENSEARCH_DELAY)
+                    elif es_client:
+                        logger.debug("⚠️ OpenSearch cliente DESABILITADO - mensagem não adicionada ao buffer")
+                    else:
+                        logger.debug("❌ OpenSearch cliente INDISPONÍVEL - mensagem não adicionada ao buffer")
                 else:
                     # Contar mensagens filtradas para debug
                     messages_filtered_count += 1
+                    debug_counts['messages_filtered_out'] += 1
                     if msg.text:
-                        logger.info("⛔ FILTRADA: MSG %s (%d chars): '%s'", msg.id, len(msg.text.strip()), msg.text[:30])
+                        logger.debug("⛔ FILTRADA: MSG %s (%d chars): '%s'", msg.id, len(msg.text.strip()), msg.text[:30])
                     else:
-                        logger.info("⛔ FILTRADA: MSG %s (sem texto)", msg.id)
+                        logger.debug("⛔ FILTRADA: MSG %s (sem texto)", msg.id)
             
             # Atualizar estado sempre (mesmo se 0 mensagens) para tracking completo
             current_time = datetime.now(timezone.utc).isoformat()
@@ -864,15 +886,18 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
             logger.info("✅ Kinesis Batch Final: todas as %d mensagens enviadas com sucesso", sent_count)
     
     # Enviar batch OpenSearch final (AWS Best Practice)
-    if opensearch_batch:
+    if opensearch_batch and es_client and hasattr(es_client, 'enabled') and es_client.enabled:
         logger.info("📦 Enviando batch OpenSearch FINAL: %d mensagens acumuladas", len(opensearch_batch))
         success_count, failed_items = send_batch_to_opensearch_bulk(opensearch_batch, es_client)
         total_sent_opensearch += success_count
+        debug_counts['opensearch_batches_sent'] += 1
         
         if failed_items:
             logger.warning("⚠️ OpenSearch Batch Final: %d falharam, %d enviadas", len(failed_items), len(opensearch_batch))
         else:
             logger.info("✅ OpenSearch Batch Final: todas as %d mensagens enviadas com sucesso", success_count)
+    elif opensearch_batch:
+        logger.warning("⚠️ OpenSearch batch final não enviado: %d mensagens descartadas (cliente desabilitado/indisponível)", len(opensearch_batch))
     
     # Salvar estado atualizado (crítico para evitar duplicatas)
     if save_state(state):
@@ -899,6 +924,33 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
                grupos_com_mensagens, grupos_processados - grupos_com_mensagens)
     logger.info("🔄 Tipos: %d primeira vez (6h histórico), %d incrementais (min_id)", 
                grupos_primeira_vez, grupos_incrementais)
+    
+    # DEBUG: Estatísticas detalhadas para diagnóstico
+    logger.info("\n" + "="*80)
+    logger.info("🔍 DEBUG - FLUXO DETALHADO DE MENSAGENS:")
+    logger.info("="*80)
+    logger.info("📡 Mensagens da API total: %d", debug_counts['messages_api_total'])
+    logger.info("⛔ Mensagens filtradas (texto < 3 chars): %d", debug_counts['messages_filtered_out'])
+    logger.info("📦 Mensagens adicionadas ao buffer Kinesis: %d", debug_counts['messages_added_kinesis'])
+    logger.info("📦 Mensagens adicionadas ao buffer OpenSearch: %d", debug_counts['messages_added_opensearch'])
+    logger.info("🚀 Batches OpenSearch enviados: %d", debug_counts['opensearch_batches_sent'])
+    logger.info("📤 Mensagens OpenSearch intermediárias enviadas: %d", debug_counts['opensearch_intermediate_sent'])
+    logger.info("📤 Mensagens OpenSearch finais enviadas: %d", total_sent_opensearch - debug_counts['opensearch_intermediate_sent'])
+    
+    # Cálculos de verificação
+    processed_vs_api = debug_counts['messages_added_kinesis'] + debug_counts['messages_filtered_out']
+    kinesis_vs_opensearch = debug_counts['messages_added_kinesis'] - debug_counts['messages_added_opensearch']
+    
+    logger.info("🔍 VERIFICAÇÕES:")
+    logger.info("   API vs Processadas: %d vs %d = %s", 
+               debug_counts['messages_api_total'], processed_vs_api,
+               "✅ OK" if debug_counts['messages_api_total'] == processed_vs_api else "❌ DISCREPÂNCIA")
+    logger.info("   Kinesis vs OpenSearch buffer: %d vs %d = diferença de %d", 
+               debug_counts['messages_added_kinesis'], debug_counts['messages_added_opensearch'], kinesis_vs_opensearch)
+    logger.info("   OpenSearch buffer vs enviadas: %d vs %d = %s", 
+               debug_counts['messages_added_opensearch'], total_sent_opensearch,
+               "✅ OK" if debug_counts['messages_added_opensearch'] == total_sent_opensearch else "❌ PERDA")
+    logger.info("="*80)
     
     # Alerta se cobertura não foi completa
     if grupos_processados < len(groups_to_process):
