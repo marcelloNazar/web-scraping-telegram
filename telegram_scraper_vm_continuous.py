@@ -320,43 +320,111 @@ def send_message_to_kinesis_complete(message_data, group):
         logger.error("❌ Erro Kinesis para %s: %s", group, kinesis_error)
         return False
 
-def send_message_to_opensearch(message_data, es_client):
-    """Enviar mensagem diretamente para OpenSearch"""
+def send_batch_to_opensearch_bulk(messages_batch, es_client):
+    """
+    Enviar lote de mensagens usando Bulk API (AWS Best Practice)
+    Baseado na documentação: AOSPERF06-BP02 (3-5 MiB batches)
+    """
+    if not messages_batch or not es_client:
+        return 0, []
+    
     try:
-        # Debug: verificar se cliente está disponível
-        if not es_client:
-            logger.warning("⚠️ Cliente OpenSearch é None - mensagem não enviada")
-            return False
-            
-        if not hasattr(es_client, 'index_message'):
-            logger.error("❌ Cliente OpenSearch não tem método 'index_message'")
-            return False
-            
-        # Debug: verificar se cliente está habilitado
+        # Verificar se cliente está habilitado
         if hasattr(es_client, 'enabled') and not es_client.enabled:
-            logger.warning("⚠️ Cliente OpenSearch DESABILITADO - mensagem não enviada")
-            return False
+            logger.warning("⚠️ Cliente OpenSearch DESABILITADO - batch não enviado")
+            return 0, messages_batch
+        
+        # Preparar bulk request
+        bulk_body = []
+        doc_ids = []
+        
+        for msg_data in messages_batch:
+            doc_id = "%s_%s_%s" % (
+                msg_data.get('group_name', 'unknown'),
+                msg_data.get('message_id', 'unknown'),
+                int(datetime.now(timezone.utc).timestamp() * 1000000)  # Microseconds para unicidade
+            )
+            doc_ids.append(doc_id)
             
-        doc_id = "%s_%s_%s" % (
-            message_data.get('group_name', 'unknown'),
-            message_data.get('message_id', 'unknown'),
-            int(datetime.now(timezone.utc).timestamp())
-        )
+            # Action header para bulk
+            bulk_body.append({
+                "index": {
+                    "_index": "telegram-messages",
+                    "_id": doc_id
+                }
+            })
+            
+            # Document body
+            bulk_body.append(msg_data)
         
-        logger.info("📤 Tentando enviar para OpenSearch: doc_id=%s", doc_id)
-        result = es_client.index_message(message_data, doc_id)
+        # Calcular tamanho aproximado (AWS recomenda 3-5 MiB)
+        bulk_size_mb = len(json.dumps(bulk_body).encode('utf-8')) / (1024 * 1024)
         
-        if result:
-            logger.info("✅ OpenSearch: sucesso para doc_id=%s", doc_id)
+        logger.info("📦 Enviando bulk OpenSearch: %d docs (%.2f MB)", len(messages_batch), bulk_size_mb)
+        
+        # Enviar bulk usando cliente ES
+        if hasattr(es_client, 'es_client') and es_client.es_client:
+            # Usar cliente Elasticsearch nativo para bulk
+            from elasticsearch import helpers
+            
+            # Preparar documentos para helpers.bulk
+            documents = []
+            for i, msg_data in enumerate(messages_batch):
+                doc = {
+                    '_index': 'telegram-messages',
+                    '_id': doc_ids[i],
+                    '_source': msg_data
+                }
+                documents.append(doc)
+            
+            # Bulk insert com retry
+            success_count, _ = helpers.bulk(
+                es_client.es_client,
+                documents,
+                chunk_size=100,  # 100 docs per chunk
+                max_retries=3,
+                initial_backoff=1,
+                max_backoff=60,
+                raise_on_error=False,
+                raise_on_exception=False
+            )
+            
+            failed_items = [{'doc_id': doc_ids[i], 'error': 'bulk_helper_failed'} 
+                           for i, doc in enumerate(documents) if doc not in success_count]
+            
+            logger.info("✅ Bulk OpenSearch: %d/%d sucessos", success_count, len(messages_batch))
+            
+            if failed_items:
+                logger.warning("⚠️ Bulk OpenSearch: %d falhas", len(failed_items))
+            
+            return success_count, failed_items
+            
         else:
-            logger.warning("⚠️ OpenSearch: falha silenciosa para doc_id=%s", doc_id)
+            # Fallback: usar método individual (para compatibilidade)
+            success_count = 0
+            failed_items = []
             
-        return result
+            for i, msg_data in enumerate(messages_batch):
+                try:
+                    result = es_client.index_message(msg_data, doc_ids[i])
+                    if result:
+                        success_count += 1
+                    else:
+                        failed_items.append({'doc_id': doc_ids[i], 'error': 'index_failed'})
+                except Exception as e:
+                    failed_items.append({'doc_id': doc_ids[i], 'error': str(e)})
+                
+                # Mini delay entre requests individuais
+                time.sleep(0.05)  # 50ms
+            
+            return success_count, failed_items
         
-    except Exception as es_error:
-        logger.error("❌ Erro OpenSearch: %s", es_error)
-        logger.error("📋 Traceback OpenSearch: %s", traceback.format_exc())
-        return False
+    except Exception as bulk_error:
+        logger.error("❌ Erro Bulk OpenSearch: %s", bulk_error)
+        logger.error("📋 Traceback: %s", traceback.format_exc())
+        failed_items = [{'doc_id': f'unknown_{i}', 'error': str(bulk_error)} 
+                       for i in range(len(messages_batch))]
+        return 0, failed_items
 
 def process_telegram_groups_continuous(client, groups_data, es_client):
     """Processar grupos Telegram para execução contínua com controle de estado (sem duplicatas)"""
@@ -391,6 +459,11 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
     
     # Buffer para batch Kinesis otimizado (AWS Best Practices)
     kinesis_batch = []
+    
+    # Buffer para batch OpenSearch otimizado (AWS Best Practices)
+    opensearch_batch = []
+    OPENSEARCH_BATCH_SIZE = 100  # Mensagens por batch (AWS recomenda 3-5 MiB)
+    OPENSEARCH_DELAY = 2.0       # Segundos entre batches (rate limiting)
     
     # Carregar estado para evitar duplicatas
     state = load_state()
@@ -532,10 +605,26 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
                     # Adicionar ao batch Kinesis (AWS Best Practice - envio em lote)
                     kinesis_batch.append(message_data)
                     
-                    # Enviar para OpenSearch direto
-                    if es_client and send_message_to_opensearch(message_data, es_client):
-                        total_sent_opensearch += 1
-                        logger.info("🔍 ✅ OpenSearch: %s | %s", group_username, classification)
+                    # Adicionar ao batch OpenSearch (AWS Best Practice - bulk requests)
+                    if es_client:
+                        opensearch_batch.append(message_data)
+                        logger.debug("📦 OpenSearch batch: %s | %s | MSG_%s (batch size: %d)", 
+                                   group_username, classification, msg.id, len(opensearch_batch))
+                        
+                        # Enviar batch quando atingir tamanho máximo
+                        if len(opensearch_batch) >= OPENSEARCH_BATCH_SIZE:
+                            logger.info("🚀 Enviando batch OpenSearch: %d mensagens acumuladas", len(opensearch_batch))
+                            success_count, failed_items = send_batch_to_opensearch_bulk(opensearch_batch, es_client)
+                            total_sent_opensearch += success_count
+                            
+                            if failed_items:
+                                logger.warning("⚠️ Batch OpenSearch: %d/%d falharam", len(failed_items), len(opensearch_batch))
+                            else:
+                                logger.info("✅ Batch OpenSearch: %d/%d sucessos", success_count, len(opensearch_batch))
+                            
+                            # Reset batch e delay para rate limiting
+                            opensearch_batch = []
+                            time.sleep(OPENSEARCH_DELAY)
                 else:
                     # Contar mensagens filtradas para debug
                     messages_filtered_count += 1
@@ -588,6 +677,17 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
             logger.warning("⚠️ Kinesis Batch Final: %d falharam, %d enviadas", failed_count, sent_count)
         else:
             logger.info("✅ Kinesis Batch Final: todas as %d mensagens enviadas com sucesso", sent_count)
+    
+    # Enviar batch OpenSearch final (AWS Best Practice)
+    if opensearch_batch:
+        logger.info("📦 Enviando batch OpenSearch FINAL: %d mensagens acumuladas", len(opensearch_batch))
+        success_count, failed_items = send_batch_to_opensearch_bulk(opensearch_batch, es_client)
+        total_sent_opensearch += success_count
+        
+        if failed_items:
+            logger.warning("⚠️ OpenSearch Batch Final: %d falharam, %d enviadas", len(failed_items), len(opensearch_batch))
+        else:
+            logger.info("✅ OpenSearch Batch Final: todas as %d mensagens enviadas com sucesso", success_count)
     
     # Salvar estado atualizado (crítico para evitar duplicatas)
     if save_state(state):
