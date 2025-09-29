@@ -382,14 +382,14 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
             
             if last_message_id:
                 # Usar min_id para pegar apenas mensagens NOVAS (AWS Best Practice)
-                messages = client.get_messages(group_username, min_id=last_message_id)
+                messages = client.get_messages(group_username, min_id=last_message_id, limit=100)
                 logger.info("📥 [INCREMENTAL] %d mensagens novas em %s (min_id=%s)", 
                            len(messages), group_username, last_message_id)
             else:
-                # Primeira execução: pegar últimas 6 horas SEM LIMITE para captura completa
+                # Primeira execução: pegar últimas 6 horas com limite alto para captura completa
                 offset_date = datetime.now(timezone.utc) - timedelta(hours=6)
-                messages = client.get_messages(group_username, offset_date=offset_date)
-                logger.info("📥 [PRIMEIRA VEZ] %d mensagens últimas 6h em %s (SEM LIMITE)", 
+                messages = client.get_messages(group_username, offset_date=offset_date, limit=100)
+                logger.info("📥 [PRIMEIRA VEZ] %d mensagens últimas 6h em %s (limit=100)", 
                            len(messages), group_username)
             
             # Rate limiting: pausa segura para evitar flood (10 min ciclo = mais tempo disponível)
@@ -465,7 +465,7 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
                         'shares': forwards,
                         'forwards': forwards,  # Alias para compatibilidade
                         # Campos extras para análise
-                        'author_id': getattr(msg, 'from_id', None),
+                        'author_id': str(getattr(msg, 'from_id', '')) if getattr(msg, 'from_id', None) else None,
                         'reply_to': getattr(msg, 'reply_to_msg_id', None),
                         'is_forwarded': getattr(msg, 'fwd_from', None) is not None,
                         'media_type': 'text' if not msg.media else str(type(msg.media).__name__)
