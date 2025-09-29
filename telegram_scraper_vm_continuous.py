@@ -394,7 +394,34 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
                     classification = classify_message(msg.text)
                     classification_stats[classification] = classification_stats.get(classification, 0) + 1
                     
-                    # Preparar dados com informações do Google Sheets
+                    # Extrair metadados do Telegram (views, reactions, shares)
+                    views = getattr(msg, 'views', 0) or 0
+                    forwards = getattr(msg, 'forwards', 0) or 0
+                    
+                    # Processar reações (pode ser None, lista ou objeto ReactionCount)
+                    reactions_total = 0
+                    reactions_detail = []
+                    if hasattr(msg, 'reactions') and msg.reactions:
+                        if hasattr(msg.reactions, 'results'):
+                            for reaction in msg.reactions.results:
+                                count = getattr(reaction, 'count', 0)
+                                reactions_total += count
+                                
+                                # Extrair emoji/reaction type
+                                if hasattr(reaction, 'reaction'):
+                                    if hasattr(reaction.reaction, 'emoticon'):
+                                        emoji = reaction.reaction.emoticon
+                                    else:
+                                        emoji = str(reaction.reaction)
+                                else:
+                                    emoji = 'unknown'
+                                
+                                reactions_detail.append({
+                                    'emoji': emoji,
+                                    'count': count
+                                })
+                    
+                    # Preparar dados COMPLETOS com metadados do Telegram
                     message_data = {
                         'message': msg.text[:800],
                         'group_name': group_username,
@@ -405,7 +432,18 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
                         'message_id': str(msg.id),
                         'source': 'vm_scraper_continuous',
                         'content': msg.text[:500],
-                        'indexed_at': datetime.now(timezone.utc).isoformat()
+                        'indexed_at': datetime.now(timezone.utc).isoformat(),
+                        # METADADOS ADICIONAIS (como no dashboard)
+                        'views': views,
+                        'reactions': reactions_total,
+                        'reactions_detail': reactions_detail,
+                        'shares': forwards,
+                        'forwards': forwards,  # Alias para compatibilidade
+                        # Campos extras para análise
+                        'author_id': getattr(msg, 'from_id', None),
+                        'reply_to': getattr(msg, 'reply_to_msg_id', None),
+                        'is_forwarded': getattr(msg, 'fwd_from', None) is not None,
+                        'media_type': 'text' if not msg.media else str(type(msg.media).__name__)
                     }
                     
                     # Adicionar ao batch Kinesis (AWS Best Practice - envio em lote)
