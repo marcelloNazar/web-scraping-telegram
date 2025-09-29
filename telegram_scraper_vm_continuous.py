@@ -441,64 +441,51 @@ def send_opensearch_bulk_with_retry(es_client, bulk_body, doc_ids, doc_count, bu
             logger.info("🔍 Tentativa %d/%d: Enviando bulk OpenSearch %d docs (%.2f MB)", 
                        attempt + 1, max_retries + 1, doc_count, bulk_size_mb)
             
+            # Tentar usar bulk API nativo se disponível
             if hasattr(es_client, 'es_client') and es_client.es_client:
-                # Usar cliente Elasticsearch nativo para bulk
-                from elasticsearch import helpers
-                
-                # Preparar documentos para helpers.bulk
-                documents = []
-                for i in range(0, len(bulk_body), 2):  # bulk_body tem pares: action, document
-                    action = bulk_body[i]
-                    document = bulk_body[i + 1]
-                    doc = {
-                        '_index': action['index']['_index'],
-                        '_id': action['index']['_id'],
-                        '_source': document
-                    }
-                    documents.append(doc)
-                
-                # Bulk insert com configuração otimizada
-                success_count, failed_items = helpers.bulk(
-                    es_client.es_client,
-                    documents,
-                    chunk_size=50,  # Chunks menores para estabilidade
-                    max_retries=0,  # Sem retry interno - controlamos aqui
-                    timeout=30,  # Timeout de 30s
-                    raise_on_error=False,
-                    raise_on_exception=False
-                )
-                
-                if isinstance(success_count, int) and success_count > 0:
-                    logger.info("✅ OpenSearch SUCCESS: %d/%d docs indexados", success_count, doc_count)
-                    return success_count, []
-                
-                # Se chegou aqui, houve falhas
-                logger.warning("⚠️ OpenSearch falhou na tentativa %d", attempt + 1)
-                
-            else:
-                # Fallback: usar método individual
-                logger.warning("⚠️ Usando fallback individual para OpenSearch")
-                success_count = 0
-                failed_items = []
-                
-                for i in range(0, len(bulk_body), 2):
-                    try:
-                        document = bulk_body[i + 1]
-                        doc_id = bulk_body[i]['index']['_id']
-                        result = es_client.index_message(document, doc_id)
-                        if result:
-                            success_count += 1
-                        else:
-                            failed_items.append({'doc_id': doc_id, 'error': 'index_failed'})
-                    except Exception as e:
-                        failed_items.append({'doc_id': f'doc_{i//2}', 'error': str(e)})
+                try:
+                    # Tentar importar elasticsearch helpers
+                    from elasticsearch import helpers
                     
-                    # Mini delay para não sobrecarregar
-                    time.sleep(0.02)  # 20ms
-                
-                if success_count > 0:
-                    logger.info("✅ OpenSearch Fallback: %d/%d docs indexados", success_count, doc_count)
-                    return success_count, failed_items
+                    # Preparar documentos para helpers.bulk
+                    documents = []
+                    for i in range(0, len(bulk_body), 2):  # bulk_body tem pares: action, document
+                        action = bulk_body[i]
+                        document = bulk_body[i + 1]
+                        doc = {
+                            '_index': action['index']['_index'],
+                            '_id': action['index']['_id'],
+                            '_source': document
+                        }
+                        documents.append(doc)
+                    
+                    # Bulk insert com configuração otimizada
+                    success_count, failed_items = helpers.bulk(
+                        es_client.es_client,
+                        documents,
+                        chunk_size=50,  # Chunks menores para estabilidade
+                        max_retries=0,  # Sem retry interno - controlamos aqui
+                        timeout=30,  # Timeout de 30s
+                        raise_on_error=False,
+                        raise_on_exception=False
+                    )
+                    
+                    if isinstance(success_count, int) and success_count > 0:
+                        logger.info("✅ OpenSearch SUCCESS (helpers.bulk): %d/%d docs indexados", success_count, doc_count)
+                        return success_count, []
+                    
+                    # Se chegou aqui, houve falhas
+                    logger.warning("⚠️ OpenSearch helpers.bulk falhou na tentativa %d", attempt + 1)
+                    
+                except ImportError:
+                    # Se elasticsearch não estiver disponível, usar fallback
+                    logger.info("ℹ️ elasticsearch module não disponível, usando fallback otimizado...")
+                    return send_opensearch_fallback_bulk(es_client, bulk_body, doc_count)
+                    
+            else:
+                # Fallback: usar método customizado otimizado
+                logger.warning("⚠️ Cliente OpenSearch es_client não disponível, usando fallback otimizado")
+                return send_opensearch_fallback_bulk(es_client, bulk_body, doc_count)
                 
             # Se chegou aqui, a tentativa falhou
             if attempt < max_retries:
@@ -519,6 +506,69 @@ def send_opensearch_bulk_with_retry(es_client, bulk_body, doc_ids, doc_count, bu
                 return 0, [{'doc_id': f'doc_{i}', 'error': str(e)} for i in range(doc_count)]
     
     return 0, [{'doc_id': f'doc_{i}', 'error': 'unknown_failure'} for i in range(doc_count)]
+
+def send_opensearch_fallback_bulk(es_client, bulk_body, doc_count):
+    """
+    Fallback bulk para quando elasticsearch module não está disponível
+    Usa apenas o cliente OpenSearch existente
+    """
+    logger.info("📦 Usando fallback bulk otimizado (sem elasticsearch module)")
+    
+    success_count = 0
+    failed_items = []
+    
+    # Rate limiting: processar em mini-batches de 10 documentos
+    batch_size = 10
+    
+    try:
+        for i in range(0, len(bulk_body), batch_size * 2):  # *2 porque bulk_body tem pares
+            mini_batch_start = i
+            mini_batch_end = min(i + batch_size * 2, len(bulk_body))
+            
+            mini_batch_success = 0
+            mini_batch_errors = []
+            
+            # Processar mini-batch
+            for j in range(mini_batch_start, mini_batch_end, 2):
+                try:
+                    if j + 1 < len(bulk_body):
+                        action = bulk_body[j]
+                        document = bulk_body[j + 1]
+                        doc_id = action['index']['_id']
+                        
+                        # Usar método individual do cliente existente
+                        result = es_client.index_message(document, doc_id)
+                        if result:
+                            mini_batch_success += 1
+                            success_count += 1
+                        else:
+                            error_info = {'doc_id': doc_id, 'error': 'index_failed'}
+                            mini_batch_errors.append(error_info)
+                            failed_items.append(error_info)
+                            
+                except Exception as e:
+                    error_info = {'doc_id': f'doc_{j//2}', 'error': str(e)}
+                    mini_batch_errors.append(error_info)
+                    failed_items.append(error_info)
+                
+                # Mini delay para não sobrecarregar
+                time.sleep(0.01)  # 10ms por documento
+            
+            # Log do progresso do mini-batch
+            if mini_batch_success > 0:
+                logger.info("✅ Mini-batch %d-%d: %d sucessos, %d falhas", 
+                           mini_batch_start//2, mini_batch_end//2, mini_batch_success, len(mini_batch_errors))
+            
+            # Delay entre mini-batches para rate limiting
+            if mini_batch_end < len(bulk_body):
+                time.sleep(0.5)  # 500ms entre mini-batches
+        
+        logger.info("✅ Fallback bulk completo: %d/%d docs indexados", success_count, doc_count)
+        return success_count, failed_items
+        
+    except Exception as e:
+        logger.error("❌ Erro no fallback bulk: %s", e)
+        return 0, [{'doc_id': f'doc_{i}', 'error': str(e)} for i in range(doc_count)]
 
 def send_opensearch_large_batch(messages_batch, es_client, max_size_mb):
     """
