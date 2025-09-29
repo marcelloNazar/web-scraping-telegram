@@ -382,14 +382,14 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
             
             if last_message_id:
                 # Usar min_id para pegar apenas mensagens NOVAS (AWS Best Practice)
-                messages = client.get_messages(group_username, min_id=last_message_id, limit=100)
-                logger.info("📥 [INCREMENTAL] %d mensagens novas em %s (min_id=%s)", 
+                messages = client.get_messages(group_username, min_id=last_message_id, limit=None)
+                logger.info("📥 [INCREMENTAL] %d mensagens API em %s (min_id=%s)", 
                            len(messages), group_username, last_message_id)
             else:
-                # Primeira execução: pegar últimas 6 horas com limite alto para captura completa
+                # Primeira execução: pegar últimas 6 horas SEM LIMITE para captura completa
                 offset_date = datetime.now(timezone.utc) - timedelta(hours=6)
-                messages = client.get_messages(group_username, offset_date=offset_date, limit=100)
-                logger.info("📥 [PRIMEIRA VEZ] %d mensagens últimas 6h em %s (limit=100)", 
+                messages = client.get_messages(group_username, offset_date=offset_date, limit=None)
+                logger.info("📥 [PRIMEIRA VEZ] %d mensagens API últimas 6h em %s (SEM LIMITE)", 
                            len(messages), group_username)
             
             # Rate limiting: pausa segura para evitar flood (10 min ciclo = mais tempo disponível)
@@ -398,10 +398,16 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
             
             # Atualizar estado com último message_id processado
             newest_message_id = None
+            messages_processed_count = 0
+            messages_filtered_count = 0
+            
+            logger.info("🔍 DEBUG: Processando %d mensagens de %s...", len(messages), group_username)
             
             for msg in messages:
-                if msg.text and len(msg.text.strip()) > 10:
+                # FILTRO RELAXADO: aceitar mensagens com 3+ caracteres (antes era 10)
+                if msg.text and len(msg.text.strip()) > 3:
                     total_messages += 1
+                    messages_processed_count += 1
                     
                     # Rastrear message_id mais recente
                     if newest_message_id is None or msg.id > newest_message_id:
@@ -478,6 +484,13 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
                     if es_client and send_message_to_opensearch(message_data, es_client):
                         total_sent_opensearch += 1
                         logger.info("🔍 ✅ OpenSearch: %s | %s", group_username, classification)
+                else:
+                    # Contar mensagens filtradas para debug
+                    messages_filtered_count += 1
+                    if msg.text:
+                        logger.info("⛔ FILTRADA: MSG %s (%d chars): '%s'", msg.id, len(msg.text.strip()), msg.text[:30])
+                    else:
+                        logger.info("⛔ FILTRADA: MSG %s (sem texto)", msg.id)
             
             # Atualizar estado sempre (mesmo se 0 mensagens) para tracking completo
             current_time = datetime.now(timezone.utc).isoformat()
@@ -488,8 +501,8 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
                     'total_processed': len(messages),
                     'messages_this_run': len(messages)
                 }
-                logger.info("📄 Estado atualizado para %s: last_id=%s (%d msgs processadas)", 
-                           group_username, newest_message_id, len(messages))
+                logger.info("📄 Estado atualizado para %s: last_id=%s (%d processadas de %d API)", 
+                           group_username, newest_message_id, messages_processed_count, len(messages))
             else:
                 # Atualizar timestamp mesmo se sem mensagens novas
                 if group_username in state:
@@ -502,7 +515,8 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
                         'total_processed': 0,
                         'messages_this_run': 0
                     }
-                logger.info("📄 Estado atualizado para %s: SEM MENSAGENS NOVAS", group_username)
+                logger.info("📄 Estado atualizado para %s: SEM MENSAGENS PROCESSADAS (%d API, %d filtradas)", 
+                           group_username, len(messages), messages_filtered_count)
             
         except FloodWaitError as flood_error:
             logger.warning("⏳ Rate limit para %s: aguardar %ds", group_username, flood_error.seconds)
