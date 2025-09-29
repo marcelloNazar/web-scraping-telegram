@@ -62,9 +62,21 @@ def initialize_elasticsearch():
         try:
             from utils.aws_elasticsearch import ElasticsearchClient
             elasticsearch_client = ElasticsearchClient()
-            logger.info("✅ Cliente OpenSearch inicializado")
+            
+            # Verificar se o cliente foi habilitado com sucesso
+            if hasattr(elasticsearch_client, 'enabled') and elasticsearch_client.enabled:
+                logger.info("✅ Cliente OpenSearch inicializado e HABILITADO")
+                if hasattr(elasticsearch_client, 'domain_endpoint'):
+                    logger.info("🔗 Endpoint: %s", elasticsearch_client.domain_endpoint)
+            else:
+                logger.warning("⚠️ Cliente OpenSearch inicializado mas DESABILITADO")
+                if hasattr(elasticsearch_client, 'domain_endpoint'):
+                    logger.warning("🔗 Endpoint: %s", elasticsearch_client.domain_endpoint or "None")
+                logger.warning("📝 Mensagens não serão enviadas para OpenSearch")
+                
         except Exception as e:
             logger.error("❌ Erro ao inicializar OpenSearch: %s", e)
+            logger.error("📋 Traceback: %s", traceback.format_exc())
             elasticsearch_client = None
     return elasticsearch_client
 
@@ -311,17 +323,39 @@ def send_message_to_kinesis_complete(message_data, group):
 def send_message_to_opensearch(message_data, es_client):
     """Enviar mensagem diretamente para OpenSearch"""
     try:
-        if es_client and hasattr(es_client, 'index_message'):
-            doc_id = "%s_%s_%s" % (
-                message_data.get('group_name', 'unknown'),
-                message_data.get('message_id', 'unknown'),
-                int(datetime.now(timezone.utc).timestamp())
-            )
-            return es_client.index_message(message_data, doc_id)
-        return False
+        # Debug: verificar se cliente está disponível
+        if not es_client:
+            logger.warning("⚠️ Cliente OpenSearch é None - mensagem não enviada")
+            return False
+            
+        if not hasattr(es_client, 'index_message'):
+            logger.error("❌ Cliente OpenSearch não tem método 'index_message'")
+            return False
+            
+        # Debug: verificar se cliente está habilitado
+        if hasattr(es_client, 'enabled') and not es_client.enabled:
+            logger.warning("⚠️ Cliente OpenSearch DESABILITADO - mensagem não enviada")
+            return False
+            
+        doc_id = "%s_%s_%s" % (
+            message_data.get('group_name', 'unknown'),
+            message_data.get('message_id', 'unknown'),
+            int(datetime.now(timezone.utc).timestamp())
+        )
+        
+        logger.info("📤 Tentando enviar para OpenSearch: doc_id=%s", doc_id)
+        result = es_client.index_message(message_data, doc_id)
+        
+        if result:
+            logger.info("✅ OpenSearch: sucesso para doc_id=%s", doc_id)
+        else:
+            logger.warning("⚠️ OpenSearch: falha silenciosa para doc_id=%s", doc_id)
+            
+        return result
         
     except Exception as es_error:
         logger.error("❌ Erro OpenSearch: %s", es_error)
+        logger.error("📋 Traceback OpenSearch: %s", traceback.format_exc())
         return False
 
 def process_telegram_groups_continuous(client, groups_data, es_client):
@@ -331,6 +365,24 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
     
     logger.info("📋 ==> PROCESSANDO GRUPOS DO GOOGLE SHEETS")
     logger.info("📊 Total grupos disponíveis: %d", len(groups_data))
+    
+    # Debug: status do cliente OpenSearch
+    if es_client:
+        enabled_status = "HABILITADO" if (hasattr(es_client, 'enabled') and es_client.enabled) else "DESABILITADO"
+        logger.info("✅ Cliente OpenSearch: DISPONÍVEL mas %s", enabled_status)
+        
+        if hasattr(es_client, 'index_message'):
+            logger.info("✅ Método index_message: DISPONÍVEL")
+        else:
+            logger.error("❌ Método index_message: NÃO ENCONTRADO")
+            
+        if hasattr(es_client, 'domain_endpoint'):
+            logger.info("🔗 Endpoint OpenSearch: %s", es_client.domain_endpoint or "None")
+            
+        if enabled_status == "DESABILITADO":
+            logger.warning("⚠️ ATENÇÃO: Mensagens NÃO serão enviadas para OpenSearch!")
+    else:
+        logger.error("❌ Cliente OpenSearch: INDISPONÍVEL - mensagens não serão enviadas!")
     
     total_messages = 0
     total_sent_kinesis = 0
