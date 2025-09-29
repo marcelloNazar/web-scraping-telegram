@@ -230,20 +230,32 @@ def get_partition_key_optimized(group_name, message_id):
     return f"{group_name}#{hash_suffix}"
 
 def send_batch_to_kinesis_optimized(messages_batch):
-    """Enviar mensagens em batch usando PutRecords (AWS Best Practice)"""
+    """
+    Enviar mensagens em batch usando PutRecords (AWS Best Practice)
+    Baseado em: https://docs.aws.amazon.com/streams/latest/dev/service-sizes-and-limits.html
+    Limites: 1000 records/shard/sec, 1MB/shard/sec, 500 records/request, 5MB/request
+    """
     if not messages_batch:
         return 0, 0
     
     total_sent = 0
     total_failed = 0
     
+    # AWS Best Practices - Rate Limiting
+    KINESIS_MAX_BATCH_SIZE = 400  # 80% do limite AWS (500) para margem de segurança
+    KINESIS_MAX_REQUEST_SIZE_MB = 4.0  # 80% do limite AWS (5MB)
+    KINESIS_RETRY_DELAYS = [1, 2, 4, 8]  # Exponential backoff (AWS recomendado)
+    KINESIS_RATE_LIMIT_DELAY = 0.5  # Delay mínimo entre requests (rate limiting)
+    
     try:
-        # Preparar records para PutRecords (limite: 500 records, 5MB total)
-        max_batch_size = 500  # Limite AWS oficial
+        # Verificar tamanho total aproximado
+        total_size_mb = len(json.dumps(messages_batch).encode('utf-8')) / (1024 * 1024)
+        if total_size_mb > KINESIS_MAX_REQUEST_SIZE_MB:
+            logger.warning("⚠️ Batch muito grande (%.2f MB), dividindo em chunks menores", total_size_mb)
         
-        # Dividir em chunks se necessário
-        for i in range(0, len(messages_batch), max_batch_size):
-            batch_chunk = messages_batch[i:i + max_batch_size]
+        # Dividir em chunks respeitando limites AWS
+        for i in range(0, len(messages_batch), KINESIS_MAX_BATCH_SIZE):
+            batch_chunk = messages_batch[i:i + KINESIS_MAX_BATCH_SIZE]
             
             chunk_records = []
             for msg_data in batch_chunk:
@@ -257,53 +269,84 @@ def send_batch_to_kinesis_optimized(messages_batch):
                     'PartitionKey': partition_key
                 })
             
-            # Enviar chunk usando PutRecords
-            response = kinesis_client.put_records(
-                StreamName='telegram-messages',
-                Records=chunk_records
+            # Calcular tamanho do chunk
+            chunk_size_mb = len(json.dumps(chunk_records).encode('utf-8')) / (1024 * 1024)
+            
+            # Rate limiting baseado em AWS Best Practices
+            time.sleep(KINESIS_RATE_LIMIT_DELAY)
+            
+            # Enviar chunk usando PutRecords com retry inteligente
+            chunk_success, chunk_failed = send_kinesis_chunk_with_retry(
+                chunk_records, KINESIS_RETRY_DELAYS, chunk_size_mb
             )
             
-            # Verificar falhas (AWS recomenda tratar)
-            failed_count = response.get('FailedRecordCount', 0)
-            success_count = len(chunk_records) - failed_count
+            total_sent += chunk_success
+            total_failed += chunk_failed
             
-            total_sent += success_count
-            total_failed += failed_count
-            
-            if failed_count > 0:
-                logger.warning("⚠️ Kinesis PutRecords: %d/%d records falharam", 
-                             failed_count, len(chunk_records))
-                # Retry simples: Re-tentar records falhados uma vez
-                failed_records = [chunk_records[idx] for idx, record in enumerate(response['Records']) 
-                                if 'ErrorCode' in record]
-                if failed_records:
-                    logger.info("🔄 Tentando reenviar %d records falhados...", len(failed_records))
-                    try:
-                        retry_response = kinesis_client.put_records(
-                            StreamName='telegram-messages',
-                            Records=failed_records
-                        )
-                        retry_failed = retry_response.get('FailedRecordCount', 0)
-                        if retry_failed == 0:
-                            logger.info("✅ Retry successful: todos os records reenviados")
-                            total_sent += len(failed_records)  # Somar records que foram reenviados com sucesso
-                            total_failed -= len(failed_records)  # Reduzir dos falhados
-                        else:
-                            logger.warning("⚠️ Retry parcial: %d ainda falharam", retry_failed)
-                            retry_success = len(failed_records) - retry_failed
-                            total_sent += retry_success
-                            total_failed -= retry_success
-                    except Exception as retry_error:
-                        logger.error("❌ Erro no retry: %s", retry_error)
-            
-            logger.info("✅ Kinesis PutRecords: %d/%d records enviados com sucesso", 
-                       success_count, len(chunk_records))
+            logger.info("✅ Kinesis Chunk: %d/%d records enviados (%.2f MB)", 
+                       chunk_success, len(chunk_records), chunk_size_mb)
         
         return total_sent, total_failed
         
     except Exception as kinesis_error:
         logger.error("❌ Erro Kinesis PutRecords: %s", kinesis_error)
         return 0, len(messages_batch)
+
+def send_kinesis_chunk_with_retry(chunk_records, retry_delays, chunk_size_mb):
+    """
+    Enviar chunk para Kinesis com retry exponential backoff (AWS Best Practice)
+    """
+    max_retries = len(retry_delays)
+    
+    for attempt in range(max_retries + 1):
+        try:
+            logger.info("📡 Tentativa %d/%d: Enviando %d records (%.2f MB) para Kinesis", 
+                       attempt + 1, max_retries + 1, len(chunk_records), chunk_size_mb)
+            
+            response = kinesis_client.put_records(
+                StreamName='telegram-messages',
+                Records=chunk_records
+            )
+            
+            # Verificar resultados
+            failed_count = response.get('FailedRecordCount', 0)
+            success_count = len(chunk_records) - failed_count
+            
+            if failed_count == 0:
+                logger.info("✅ Kinesis SUCCESS: todos os %d records enviados", len(chunk_records))
+                return success_count, 0
+            
+            # Se há falhas, preparar retry apenas com records falhados
+            if attempt < max_retries:
+                failed_records = []
+                for idx, record_result in enumerate(response['Records']):
+                    if 'ErrorCode' in record_result:
+                        failed_records.append(chunk_records[idx])
+                        error_code = record_result.get('ErrorCode', 'Unknown')
+                        logger.warning("⚠️ Record %d falhou: %s", idx, error_code)
+                
+                # Usar apenas records falhados no próximo retry
+                chunk_records = failed_records
+                retry_delay = retry_delays[attempt]
+                
+                logger.warning("⚠️ Tentativa %d: %d/%d records falharam. Retry em %ds...", 
+                             attempt + 1, failed_count, success_count + failed_count, retry_delay)
+                time.sleep(retry_delay)
+                continue
+            else:
+                logger.error("❌ FINAL: %d records falharam após %d tentativas", failed_count, max_retries + 1)
+                return success_count, failed_count
+                
+        except Exception as e:
+            if attempt < max_retries:
+                retry_delay = retry_delays[attempt]
+                logger.error("❌ Erro na tentativa %d: %s. Retry em %ds...", attempt + 1, e, retry_delay)
+                time.sleep(retry_delay)
+            else:
+                logger.error("❌ ERRO FINAL após %d tentativas: %s", max_retries + 1, e)
+                return 0, len(chunk_records)
+    
+    return 0, len(chunk_records)
 
 def send_message_to_kinesis_complete(message_data, group):
     """FUNÇÃO LEGADA - Manter para compatibilidade (usar batch é mais eficiente)"""
@@ -323,16 +366,28 @@ def send_message_to_kinesis_complete(message_data, group):
 def send_batch_to_opensearch_bulk(messages_batch, es_client):
     """
     Enviar lote de mensagens usando Bulk API (AWS Best Practice)
-    Baseado na documentação: AOSPERF06-BP02 (3-5 MiB batches)
+    Baseado em: AOSPERF06-BP02 (3-5 MiB batches)
+    https://docs.aws.amazon.com/wellarchitected/latest/amazon-opensearch-service-lens/aosperf06-bp02.html
     """
     if not messages_batch or not es_client:
         return 0, []
+    
+    # AWS Best Practices para OpenSearch Bulk
+    OPENSEARCH_MAX_BATCH_SIZE_MB = 4.0  # 4 MiB (dentro da faixa recomendada 3-5 MiB)
+    OPENSEARCH_RETRY_DELAYS = [2, 5, 10]  # Backoff delays (segundos)
+    OPENSEARCH_MAX_RETRIES = len(OPENSEARCH_RETRY_DELAYS)
     
     try:
         # Verificar se cliente está habilitado
         if hasattr(es_client, 'enabled') and not es_client.enabled:
             logger.warning("⚠️ Cliente OpenSearch DESABILITADO - batch não enviado")
             return 0, messages_batch
+        
+        # Verificar tamanho antes de processar
+        estimated_size_mb = len(json.dumps(messages_batch).encode('utf-8')) / (1024 * 1024)
+        if estimated_size_mb > OPENSEARCH_MAX_BATCH_SIZE_MB:
+            logger.warning("⚠️ Batch muito grande (%.2f MB), dividindo em sub-batches", estimated_size_mb)
+            return send_opensearch_large_batch(messages_batch, es_client, OPENSEARCH_MAX_BATCH_SIZE_MB)
         
         # Preparar bulk request
         bulk_body = []
@@ -357,67 +412,16 @@ def send_batch_to_opensearch_bulk(messages_batch, es_client):
             # Document body
             bulk_body.append(msg_data)
         
-        # Calcular tamanho aproximado (AWS recomenda 3-5 MiB)
+        # Calcular tamanho real (AWS recomenda 3-5 MiB)
         bulk_size_mb = len(json.dumps(bulk_body).encode('utf-8')) / (1024 * 1024)
         
-        logger.info("📦 Enviando bulk OpenSearch: %d docs (%.2f MB)", len(messages_batch), bulk_size_mb)
+        logger.info("📦 Enviando bulk OpenSearch: %d docs (%.2f MB) - dentro do limite %.1f MB", 
+                   len(messages_batch), bulk_size_mb, OPENSEARCH_MAX_BATCH_SIZE_MB)
         
-        # Enviar bulk usando cliente ES
-        if hasattr(es_client, 'es_client') and es_client.es_client:
-            # Usar cliente Elasticsearch nativo para bulk
-            from elasticsearch import helpers
-            
-            # Preparar documentos para helpers.bulk
-            documents = []
-            for i, msg_data in enumerate(messages_batch):
-                doc = {
-                    '_index': 'telegram-messages',
-                    '_id': doc_ids[i],
-                    '_source': msg_data
-                }
-                documents.append(doc)
-            
-            # Bulk insert com retry
-            success_count, _ = helpers.bulk(
-                es_client.es_client,
-                documents,
-                chunk_size=100,  # 100 docs per chunk
-                max_retries=3,
-                initial_backoff=1,
-                max_backoff=60,
-                raise_on_error=False,
-                raise_on_exception=False
-            )
-            
-            failed_items = [{'doc_id': doc_ids[i], 'error': 'bulk_helper_failed'} 
-                           for i, doc in enumerate(documents) if doc not in success_count]
-            
-            logger.info("✅ Bulk OpenSearch: %d/%d sucessos", success_count, len(messages_batch))
-            
-            if failed_items:
-                logger.warning("⚠️ Bulk OpenSearch: %d falhas", len(failed_items))
-            
-            return success_count, failed_items
-            
-        else:
-            # Fallback: usar método individual (para compatibilidade)
-            success_count = 0
-            failed_items = []
-            
-            for i, msg_data in enumerate(messages_batch):
-                try:
-                    result = es_client.index_message(msg_data, doc_ids[i])
-                    if result:
-                        success_count += 1
-                    else:
-                        failed_items.append({'doc_id': doc_ids[i], 'error': 'index_failed'})
-                except Exception as e:
-                    failed_items.append({'doc_id': doc_ids[i], 'error': str(e)})
-                
-                # Mini delay entre requests individuais
-                time.sleep(0.05)  # 50ms
-            
-            return success_count, failed_items
+        # Enviar bulk usando cliente ES com retry inteligente
+        return send_opensearch_bulk_with_retry(
+            es_client, bulk_body, doc_ids, len(messages_batch), bulk_size_mb, OPENSEARCH_RETRY_DELAYS
+        )
         
     except Exception as bulk_error:
         logger.error("❌ Erro Bulk OpenSearch: %s", bulk_error)
@@ -425,6 +429,137 @@ def send_batch_to_opensearch_bulk(messages_batch, es_client):
         failed_items = [{'doc_id': f'unknown_{i}', 'error': str(bulk_error)} 
                        for i in range(len(messages_batch))]
         return 0, failed_items
+
+def send_opensearch_bulk_with_retry(es_client, bulk_body, doc_ids, doc_count, bulk_size_mb, retry_delays):
+    """
+    Enviar bulk para OpenSearch com retry exponential backoff (AWS Best Practice)
+    """
+    max_retries = len(retry_delays)
+    
+    for attempt in range(max_retries + 1):
+        try:
+            logger.info("🔍 Tentativa %d/%d: Enviando bulk OpenSearch %d docs (%.2f MB)", 
+                       attempt + 1, max_retries + 1, doc_count, bulk_size_mb)
+            
+            if hasattr(es_client, 'es_client') and es_client.es_client:
+                # Usar cliente Elasticsearch nativo para bulk
+                from elasticsearch import helpers
+                
+                # Preparar documentos para helpers.bulk
+                documents = []
+                for i in range(0, len(bulk_body), 2):  # bulk_body tem pares: action, document
+                    action = bulk_body[i]
+                    document = bulk_body[i + 1]
+                    doc = {
+                        '_index': action['index']['_index'],
+                        '_id': action['index']['_id'],
+                        '_source': document
+                    }
+                    documents.append(doc)
+                
+                # Bulk insert com configuração otimizada
+                success_count, failed_items = helpers.bulk(
+                    es_client.es_client,
+                    documents,
+                    chunk_size=50,  # Chunks menores para estabilidade
+                    max_retries=0,  # Sem retry interno - controlamos aqui
+                    timeout=30,  # Timeout de 30s
+                    raise_on_error=False,
+                    raise_on_exception=False
+                )
+                
+                if isinstance(success_count, int) and success_count > 0:
+                    logger.info("✅ OpenSearch SUCCESS: %d/%d docs indexados", success_count, doc_count)
+                    return success_count, []
+                
+                # Se chegou aqui, houve falhas
+                logger.warning("⚠️ OpenSearch falhou na tentativa %d", attempt + 1)
+                
+            else:
+                # Fallback: usar método individual
+                logger.warning("⚠️ Usando fallback individual para OpenSearch")
+                success_count = 0
+                failed_items = []
+                
+                for i in range(0, len(bulk_body), 2):
+                    try:
+                        document = bulk_body[i + 1]
+                        doc_id = bulk_body[i]['index']['_id']
+                        result = es_client.index_message(document, doc_id)
+                        if result:
+                            success_count += 1
+                        else:
+                            failed_items.append({'doc_id': doc_id, 'error': 'index_failed'})
+                    except Exception as e:
+                        failed_items.append({'doc_id': f'doc_{i//2}', 'error': str(e)})
+                    
+                    # Mini delay para não sobrecarregar
+                    time.sleep(0.02)  # 20ms
+                
+                if success_count > 0:
+                    logger.info("✅ OpenSearch Fallback: %d/%d docs indexados", success_count, doc_count)
+                    return success_count, failed_items
+                
+            # Se chegou aqui, a tentativa falhou
+            if attempt < max_retries:
+                retry_delay = retry_delays[attempt]
+                logger.warning("⚠️ Tentativa %d falhou. Retry em %ds...", attempt + 1, retry_delay)
+                time.sleep(retry_delay)
+            else:
+                logger.error("❌ FINAL: OpenSearch falhou após %d tentativas", max_retries + 1)
+                return 0, [{'doc_id': f'doc_{i}', 'error': 'max_retries_exceeded'} for i in range(doc_count)]
+                
+        except Exception as e:
+            if attempt < max_retries:
+                retry_delay = retry_delays[attempt]
+                logger.error("❌ Erro OpenSearch tentativa %d: %s. Retry em %ds...", attempt + 1, e, retry_delay)
+                time.sleep(retry_delay)
+            else:
+                logger.error("❌ ERRO FINAL OpenSearch após %d tentativas: %s", max_retries + 1, e)
+                return 0, [{'doc_id': f'doc_{i}', 'error': str(e)} for i in range(doc_count)]
+    
+    return 0, [{'doc_id': f'doc_{i}', 'error': 'unknown_failure'} for i in range(doc_count)]
+
+def send_opensearch_large_batch(messages_batch, es_client, max_size_mb):
+    """
+    Dividir batch grande em sub-batches menores (AWS Best Practice)
+    """
+    logger.info("📦 Dividindo batch grande em sub-batches de %.1f MB", max_size_mb)
+    
+    total_success = 0
+    total_failed = []
+    current_batch = []
+    current_size_mb = 0
+    
+    for msg_data in messages_batch:
+        # Estimar tamanho da mensagem
+        msg_size_mb = len(json.dumps(msg_data).encode('utf-8')) / (1024 * 1024)
+        
+        # Se adicionar esta mensagem ultrapassar o limite, processar batch atual
+        if current_size_mb + msg_size_mb > max_size_mb and current_batch:
+            success, failed = send_batch_to_opensearch_bulk(current_batch, es_client)
+            total_success += success
+            total_failed.extend(failed)
+            
+            # Reset para próximo batch
+            current_batch = []
+            current_size_mb = 0
+            
+            # Delay entre sub-batches para rate limiting
+            time.sleep(1.0)
+        
+        # Adicionar mensagem ao batch atual
+        current_batch.append(msg_data)
+        current_size_mb += msg_size_mb
+    
+    # Processar último batch se não estiver vazio
+    if current_batch:
+        success, failed = send_batch_to_opensearch_bulk(current_batch, es_client)
+        total_success += success
+        total_failed.extend(failed)
+    
+    logger.info("📦 Processamento completo: %d sucessos, %d falhas", total_success, len(total_failed))
+    return total_success, total_failed
 
 def process_telegram_groups_continuous(client, groups_data, es_client):
     """Processar grupos Telegram para execução contínua com controle de estado (sem duplicatas)"""
@@ -462,8 +597,8 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
     
     # Buffer para batch OpenSearch otimizado (AWS Best Practices)
     opensearch_batch = []
-    OPENSEARCH_BATCH_SIZE = 100  # Mensagens por batch (AWS recomenda 3-5 MiB)
-    OPENSEARCH_DELAY = 2.0       # Segundos entre batches (rate limiting)
+    OPENSEARCH_BATCH_SIZE = 50   # Mensagens por batch (menor para estabilidade)
+    OPENSEARCH_DELAY = 3.0       # Segundos entre batches (rate limiting conservador)
     
     # Carregar estado para evitar duplicatas
     state = load_state()
