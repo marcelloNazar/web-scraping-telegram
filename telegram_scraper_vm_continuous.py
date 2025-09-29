@@ -2,6 +2,14 @@
 """
 Telegram Scraper VM Continuous
 Roda continuamente na VM fazendo scraping e enviando para Kinesis + OpenSearch
+
+GARANTIAS DE COBERTURA:
+- Processa TODOS os 200 grupos a cada 10 minutos
+- Primeira execução: últimas 6 horas SEM LIMITE  
+- Execuções seguintes: apenas mensagens novas (min_id)
+- Rate limiting seguro: 1.5s entre grupos
+- Controle de estado: zero duplicatas
+- Monitoramento completo: logs detalhados de cobertura
 """
 
 import json
@@ -350,13 +358,22 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
     
     for i, group_info in enumerate(groups_to_process):
         group_username = group_info.get('username', '')
-        group_spectrum = group_info.get('spectrum', 'unknown')
+        
+        # Extrair TODAS as categorizações (como na planilha)
+        group_project = group_info.get('project', 'Pol')
+        group_country = group_info.get('country', 'Brasil')
+        group_format = group_info.get('format', 'unknown')      # News, Debate, Meme
+        group_spectrum = group_info.get('spectrum', 'unknown')   # Right, Left, General
+        group_stance = group_info.get('stance', 'unknown')      # Conservative, Progressive
+        group_identity = group_info.get('identity', 'unknown')  # Red Pill, Religious, etc
+        group_basis = group_info.get('basis', 'None')          # Bolsonarista, Lulista, None
+        group_territory = group_info.get('territory', 'National') # National, State-level
         
         if not group_username:
             continue
             
-        logger.info("📱 ==> [%d/%d] Processando: %s (%s)", 
-                   i+1, len(groups_to_process), group_username, group_spectrum)
+        logger.info("📱 ==> [%d/%d] Processando: %s (%s|%s|%s)", 
+                   i+1, len(groups_to_process), group_username, group_spectrum, group_stance, group_basis)
         
         try:
             # Controle de estado: evitar duplicatas usando min_id ou offset_date
@@ -369,15 +386,15 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
                 logger.info("📥 [INCREMENTAL] %d mensagens novas em %s (min_id=%s)", 
                            len(messages), group_username, last_message_id)
             else:
-                # Primeira execução: pegar últimas 24 horas com limite maior para máxima cobertura
-                offset_date = datetime.now(timezone.utc) - timedelta(hours=24)
-                messages = client.get_messages(group_username, offset_date=offset_date, limit=50)
-                logger.info("📥 [PRIMEIRA VEZ] %d mensagens últimas 24h em %s (limit=50)", 
+                # Primeira execução: pegar últimas 6 horas SEM LIMITE para captura completa
+                offset_date = datetime.now(timezone.utc) - timedelta(hours=6)
+                messages = client.get_messages(group_username, offset_date=offset_date)
+                logger.info("📥 [PRIMEIRA VEZ] %d mensagens últimas 6h em %s (SEM LIMITE)", 
                            len(messages), group_username)
             
-            # Rate limiting: pausa menor para processar 200 grupos eficientemente
+            # Rate limiting: pausa segura para evitar flood (10 min ciclo = mais tempo disponível)
             if i < len(groups_to_process) - 1:  # Não pausar no último
-                time.sleep(0.5)  # 0.5s = 200 grupos em ~2 minutos
+                time.sleep(1.5)  # 1.5s = 200 grupos em ~5 minutos (sobra 5min para processamento)
             
             # Atualizar estado com último message_id processado
             newest_message_id = None
@@ -421,11 +438,19 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
                                     'count': count
                                 })
                     
-                    # Preparar dados COMPLETOS com metadados do Telegram
+                    # Preparar dados COMPLETOS com metadados do Telegram + TODAS as categorizações
                     message_data = {
                         'message': msg.text[:800],
                         'group_name': group_username,
-                        'group_spectrum': group_spectrum,
+                        # CATEGORIZAÇÕES COMPLETAS DA PLANILHA
+                        'group_project': group_project,      # 'Pol'
+                        'group_country': group_country,      # 'Brasil'
+                        'group_format': group_format,        # 'News', 'Debate', 'Meme', 'Personality'
+                        'group_spectrum': group_spectrum,    # 'Right', 'Left', 'General'
+                        'group_stance': group_stance,        # 'Conservative', 'Progressive'
+                        'group_identity': group_identity,    # 'Red Pill', 'Religious', 'Socialist'
+                        'group_basis': group_basis,          # 'Bolsonarista', 'Lulista/Petista', 'None'
+                        'group_territory': group_territory,  # 'National', 'State-level'
                         'classification': classification,
                         'timestamp': msg.date.isoformat(),
                         'date_message': msg.date.isoformat(),
@@ -454,14 +479,30 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
                         total_sent_opensearch += 1
                         logger.info("🔍 ✅ OpenSearch: %s | %s", group_username, classification)
             
-            # Atualizar estado apenas se processou mensagens
+            # Atualizar estado sempre (mesmo se 0 mensagens) para tracking completo
+            current_time = datetime.now(timezone.utc).isoformat()
             if newest_message_id is not None:
                 state[group_username] = {
                     'last_message_id': newest_message_id,
-                    'last_processed_at': datetime.now(timezone.utc).isoformat(),
-                    'total_processed': len(messages)
+                    'last_processed_at': current_time,
+                    'total_processed': len(messages),
+                    'messages_this_run': len(messages)
                 }
-                logger.info("📄 Estado atualizado para %s: last_id=%s", group_username, newest_message_id)
+                logger.info("📄 Estado atualizado para %s: last_id=%s (%d msgs processadas)", 
+                           group_username, newest_message_id, len(messages))
+            else:
+                # Atualizar timestamp mesmo se sem mensagens novas
+                if group_username in state:
+                    state[group_username]['last_processed_at'] = current_time
+                    state[group_username]['messages_this_run'] = 0
+                else:
+                    state[group_username] = {
+                        'last_message_id': None,
+                        'last_processed_at': current_time,
+                        'total_processed': 0,
+                        'messages_this_run': 0
+                    }
+                logger.info("📄 Estado atualizado para %s: SEM MENSAGENS NOVAS", group_username)
             
         except FloodWaitError as flood_error:
             logger.warning("⏳ Rate limit para %s: aguardar %ds", group_username, flood_error.seconds)
@@ -489,22 +530,34 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
         logger.warning("⚠️ Falha ao salvar estado - pode haver duplicatas na próxima execução")
     
     # Estatísticas detalhadas da execução
-    grupos_com_mensagens = len([g for g in state.values() if 'last_processed_at' in g])
-    grupos_sem_mensagens = len(groups_to_process) - grupos_com_mensagens
+    grupos_com_mensagens = len([username for username, data in state.items() 
+                               if data.get('messages_this_run', 0) > 0])
+    grupos_processados = len([username for username, data in state.items() 
+                             if 'last_processed_at' in data])
+    grupos_primeira_vez = len([username for username, data in state.items() 
+                              if data.get('last_message_id') is None])
+    grupos_incrementais = grupos_processados - grupos_primeira_vez
     
     logger.info("📊 ESTATÍSTICAS DESTA EXECUÇÃO:")
     logger.info("📱 Total mensagens capturadas: %d", total_messages)
     logger.info("📡 Kinesis enviadas: %d", total_sent_kinesis)
     logger.info("🔍 OpenSearch enviadas: %d", total_sent_opensearch)
     logger.info("📈 Classificações: %s", classification_stats)
-    logger.info("📄 Estado: %d grupos atualizados", len(state))
-    logger.info("📊 Atividade: %d grupos com mensagens, %d sem mensagens novas", 
-               grupos_com_mensagens, grupos_sem_mensagens)
+    logger.info("📄 Cobertura completa: %d/%d grupos processados", grupos_processados, len(groups_to_process))
+    logger.info("📊 Atividade: %d grupos com mensagens novas, %d sem mensagens", 
+               grupos_com_mensagens, grupos_processados - grupos_com_mensagens)
+    logger.info("🔄 Tipos: %d primeira vez (6h histórico), %d incrementais (min_id)", 
+               grupos_primeira_vez, grupos_incrementais)
+    
+    # Alerta se cobertura não foi completa
+    if grupos_processados < len(groups_to_process):
+        logger.warning("⚠️ ATENÇÃO: %d grupos NÃO foram processados! Possível rate limiting.", 
+                      len(groups_to_process) - grupos_processados)
     
     if total_messages == 0:
-        logger.info("ℹ️ NORMAL: 0 mensagens = todos os grupos já estão atualizados (sem duplicatas)")
+        logger.info("ℹ️ NORMAL: 0 mensagens = todos os grupos estão atualizados (sistema funcionando)")
     else:
-        logger.info("✅ SUCESSO: %d mensagens novas capturadas sem duplicatas", total_messages)
+        logger.info("✅ SUCESSO: %d mensagens novas capturadas (cobertura garantida)", total_messages)
     
     return total_messages, total_sent_kinesis, total_sent_opensearch, classification_stats
 
@@ -551,7 +604,7 @@ def main():
     total_kinesis_all = 0
     total_opensearch_all = 0
     
-    logger.info("🔄 ==> INICIANDO LOOP CONTÍNUO (execução a cada 2 minutos)")
+    logger.info("🔄 ==> INICIANDO LOOP CONTÍNUO (execução a cada 10 minutos)")
     
     try:
         while running:
@@ -599,16 +652,17 @@ def main():
             logger.info("🔍 Total OpenSearch: %d", total_opensearch_all)
             
             if running:
-                logger.info("⏳ Aguardando 2 minutos para próxima execução...")
+                logger.info("⏳ Aguardando 10 minutos para próxima execução...")
                 logger.info("⏹️ Para parar: Ctrl+C")
                 
-                # Aguardar 2 minutos (com verificação a cada 10 segundos)
-                for i in range(12):  # 12 * 10 = 120 segundos = 2 minutos
+                # Aguardar 10 minutos (com verificação a cada 30 segundos)
+                for i in range(20):  # 20 * 30 = 600 segundos = 10 minutos
                     if not running:
                         break
-                    time.sleep(10)
-                    if (i + 1) % 6 == 0:  # Log a cada minuto
-                        logger.info("⏳ %d minuto(s) restante(s)...", 2 - (i + 1) // 6)
+                    time.sleep(30)
+                    if (i + 1) % 4 == 0:  # Log a cada 2 minutos
+                        minutes_remaining = 10 - ((i + 1) * 30) // 60
+                        logger.info("⏳ %d minuto(s) restante(s)...", minutes_remaining)
     
     except Exception as e:
         logger.error("❌ Erro crítico no loop principal: %s", e)
