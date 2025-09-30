@@ -24,7 +24,12 @@ def force_index_with_new_template():
     config = load_config()
     
     # Inicializar cliente OpenSearch
-    es_client = ElasticsearchClient(config)
+    es_client = ElasticsearchClient(
+        domain_name=config.opensearch_domain_name,
+        region_name=config.aws_region,
+        aws_access_key_id=config.aws_access_key_id,
+        aws_secret_access_key=config.aws_secret_access_key
+    )
     if not es_client.enabled:
         print("❌ OpenSearch não habilitado")
         return False
