@@ -8,6 +8,8 @@ import pandas as pd
 import requests
 from io import StringIO
 import time
+import ast
+import re
 from typing import List, Dict, Optional
 
 class GoogleSheetsLoader:
@@ -378,6 +380,271 @@ class GoogleSheetsLoader:
             stance_members = sum(g.get('members', 0) for g in stance_groups)
             print(f"  {stance}: {len(stance_groups)} grupos, {stance_members:,} membros")
 
+    def parse_categorization_column(self, categorization_text: str) -> tuple:
+        """
+        Parse da coluna 'To Categorize' do Google Sheets
+        
+        Input: '@BolsonaroBR': ['Pol', 'Brasil', 'Debate', 'Right', 'Conservative', 'General', 'Bolsonarista', 'National']
+        Output: (username, dict com categorizações estruturadas)
+        """
+        try:
+            # Limpar string de entrada
+            categorization_text = categorization_text.strip()
+            
+            if not categorization_text or categorization_text.lower() in ['nan', 'none', '']:
+                return None, None
+            
+            # Extrair username e lista de categorias
+            if ':' in categorization_text:
+                username_part, categories_part = categorization_text.split(':', 1)
+                username = username_part.strip().strip("'\"")
+                
+                # Remove @ se presente no username
+                if username.startswith('@'):
+                    username = username[1:]
+                
+                # Parse da lista de categorias
+                try:
+                    categories_list = ast.literal_eval(categories_part.strip())
+                    
+                    if not isinstance(categories_list, list):
+                        print(f"⚠️ Categorias não são uma lista para {username}: {categories_part}")
+                        return None, None
+                        
+                except (ValueError, SyntaxError) as e:
+                    print(f"⚠️ Erro ao fazer parse de lista para {username}: {e}")
+                    return None, None
+                
+                # Mapear para estrutura padronizada (8 campos)
+                categorization = {
+                    'group_project': categories_list[0] if len(categories_list) > 0 else 'OTHER',
+                    'group_country': categories_list[1] if len(categories_list) > 1 else 'Unknown',
+                    'group_format': categories_list[2] if len(categories_list) > 2 else 'General',
+                    'group_spectrum': categories_list[3] if len(categories_list) > 3 else 'General',
+                    'group_stance': categories_list[4] if len(categories_list) > 4 else 'General',
+                    'group_identity': categories_list[5] if len(categories_list) > 5 else 'General',
+                    'group_basis': categories_list[6] if len(categories_list) > 6 else 'None',
+                    'group_territory': categories_list[7] if len(categories_list) > 7 else 'Unknown'
+                }
+                
+                return username, categorization
+            else:
+                print(f"⚠️ Formato inválido para categorização (sem ':'): {categorization_text}")
+                return None, None
+                
+        except Exception as e:
+            print(f"❌ Erro ao fazer parse de categorização: {e}")
+            return None, None
+
+    def load_groups_with_categorizations(self, include_uncategorized: bool = True) -> Dict[str, Dict]:
+        """
+        Carrega grupos com categorizações completas do Google Sheets
+        
+        Args:
+            include_uncategorized: Se deve incluir grupos sem categorização na coluna "To Categorize"
+            
+        Returns:
+            Dict com username como chave e dados completos como valor
+        """
+        try:
+            print("📊 Carregando grupos com categorizações do Google Sheets...")
+            
+            # Carregar dados da planilha
+            response = requests.get(self.sheet_url, timeout=30)
+            response.raise_for_status()
+            
+            # Processar CSV
+            df = pd.read_csv(StringIO(response.text))
+            
+            # Aplicar filtro de range se configurado
+            df_filtered = self._apply_range_filter(df)
+            
+            print(f"📊 DataFrame filtrado shape: {df_filtered.shape}")
+            print(f"📊 Colunas disponíveis: {list(df_filtered.columns)}")
+            
+            groups_categorized = {}
+            grupos_com_categorization = 0
+            grupos_sem_categorization = 0
+            
+            for index, row in df_filtered.iterrows():
+                try:
+                    # Filtrar por chip (mesmo filtro da função original)
+                    chip = str(row.get('Chip', '')).strip()
+                    
+                    # Obter filtro de chip das configurações
+                    from .config_loader import load_config
+                    config = load_config()
+                    sheets_config = config.get_sheets_config()
+                    chip_filter = sheets_config.get('chip_filter', '02')
+                    
+                    # Verificar se o chip corresponde ao filtro configurado
+                    if chip not in [chip_filter, chip_filter.zfill(2), chip_filter.lstrip('0')]:
+                        continue
+                    
+                    # Extrair username básico
+                    username = str(row.get('Group', '')).strip()
+                    if not username:
+                        continue
+                    
+                    # Limpar username
+                    username = username.replace("'", "").replace('"', "").strip()
+                    
+                    # Garantir que começa com @
+                    if not username.startswith('@'):
+                        if username and not username.lower() in ['nan', 'none', '']:
+                            username = f"@{username}"
+                        else:
+                            continue
+                    
+                    # Tentar fazer parse da coluna "To Categorize"
+                    categorization_text = str(row.get('To Categorize', '')).strip()
+                    parsed_username, categorization = self.parse_categorization_column(categorization_text)
+                    
+                    # Se temos categorização, usar ela
+                    if parsed_username and categorization:
+                        grupos_com_categorization += 1
+                        
+                        # Criar estrutura completa do grupo
+                        group_data = {
+                            'username': username,
+                            'url': str(row.get('Url', '')).strip(),
+                            'name': str(row.get('Name', '')).strip(),
+                            'description': str(row.get('Description', '')).strip(),
+                            'users': self._safe_int_conversion(str(row.get('Users', '0')).strip()),
+                            'chip': chip,
+                            
+                            # Categorizações originais da planilha (para compatibilidade)
+                            'project': str(row.get('Project', 'Pol')).strip(),
+                            'country': str(row.get('Country', 'Brasil')).strip(),
+                            'format': str(row.get('Format', '')).strip(),
+                            'spectrum': str(row.get('Spectrum', '')).strip(),
+                            'stance': str(row.get('Stance', '')).strip(),
+                            'identity': str(row.get('Identity', '')).strip(),
+                            'basis': str(row.get('Basis', '')).strip(),
+                            'territory': str(row.get('Territory', '')).strip(),
+                            
+                            # NOVAS categorizações estruturadas da coluna "To Categorize"
+                            **categorization
+                        }
+                        
+                        groups_categorized[username] = group_data
+                        
+                    elif include_uncategorized:
+                        # Grupo sem categorização na coluna "To Categorize"
+                        grupos_sem_categorization += 1
+                        
+                        # Usar categorizações das colunas individuais como fallback
+                        fallback_categorization = {
+                            'group_project': str(row.get('Project', 'OTHER')).strip(),
+                            'group_country': str(row.get('Country', 'Unknown')).strip(),
+                            'group_format': str(row.get('Format', 'General')).strip(),
+                            'group_spectrum': str(row.get('Spectrum', 'General')).strip(),
+                            'group_stance': str(row.get('Stance', 'General')).strip(),
+                            'group_identity': str(row.get('Identity', 'General')).strip(),
+                            'group_basis': str(row.get('Basis', 'None')).strip(),
+                            'group_territory': str(row.get('Territory', 'Unknown')).strip()
+                        }
+                        
+                        group_data = {
+                            'username': username,
+                            'url': str(row.get('Url', '')).strip(),
+                            'name': str(row.get('Name', '')).strip(),
+                            'description': str(row.get('Description', '')).strip(),
+                            'users': self._safe_int_conversion(str(row.get('Users', '0')).strip()),
+                            'chip': chip,
+                            
+                            # Categorizações originais da planilha
+                            'project': str(row.get('Project', 'Pol')).strip(),
+                            'country': str(row.get('Country', 'Brasil')).strip(),
+                            'format': str(row.get('Format', '')).strip(),
+                            'spectrum': str(row.get('Spectrum', '')).strip(),
+                            'stance': str(row.get('Stance', '')).strip(),
+                            'identity': str(row.get('Identity', '')).strip(),
+                            'basis': str(row.get('Basis', '')).strip(),
+                            'territory': str(row.get('Territory', '')).strip(),
+                            
+                            # Categorizações estruturadas (fallback das colunas individuais)
+                            **fallback_categorization
+                        }
+                        
+                        groups_categorized[username] = group_data
+                    
+                except Exception as e:
+                    print(f"⚠️ Erro ao processar linha {index}: {e}")
+                    continue
+            
+            print(f"✅ Carregadas categorizações:")
+            print(f"   📊 {grupos_com_categorization} grupos COM categorização estruturada")
+            print(f"   📊 {grupos_sem_categorization} grupos com categorização fallback")
+            print(f"   📊 {len(groups_categorized)} grupos TOTAL processados")
+            
+            return groups_categorized
+            
+        except Exception as e:
+            print(f"❌ Erro ao carregar categorizações: {e}")
+            return {}
+
+    def _safe_int_conversion(self, value_str: str) -> int:
+        """Converte string para int de forma segura"""
+        try:
+            return int(value_str.replace('.', '').replace(',', '').replace(' ', '')) if value_str and value_str not in ['-', 'nan', ''] else 0
+        except:
+            return 0
+
+    def test_categorizations(self, limit: int = 5):
+        """
+        Testa o sistema de categorizações
+        """
+        print("🧪 TESTANDO SISTEMA DE CATEGORIZAÇÕES:")
+        print("="*60)
+        
+        groups_categorizations = self.load_groups_with_categorizations()
+        
+        print(f"\n📊 Total de grupos carregados: {len(groups_categorizations)}")
+        
+        # Mostrar primeiros grupos como exemplo
+        print(f"\n📋 Exemplos de categorizações (primeiros {limit}):")
+        for i, (username, data) in enumerate(list(groups_categorizations.items())[:limit]):
+            print(f"\n{i+1}. Grupo: {username}")
+            print(f"   Nome: {data.get('name', 'N/A')}")
+            print(f"   Usuários: {data.get('users', 0):,}")
+            print(f"   📊 CATEGORIZAÇÕES:")
+            print(f"      Project: {data.get('group_project', 'N/A')}")
+            print(f"      Country: {data.get('group_country', 'N/A')}")
+            print(f"      Format: {data.get('group_format', 'N/A')}")
+            print(f"      Spectrum: {data.get('group_spectrum', 'N/A')}")
+            print(f"      Stance: {data.get('group_stance', 'N/A')}")
+            print(f"      Identity: {data.get('group_identity', 'N/A')}")
+            print(f"      Basis: {data.get('group_basis', 'N/A')}")
+            print(f"      Territory: {data.get('group_territory', 'N/A')}")
+            print("-" * 40)
+        
+        # Estatísticas de categorização
+        print(f"\n📈 ESTATÍSTICAS DE CATEGORIZAÇÃO:")
+        
+        # Por project
+        projects = {}
+        for data in groups_categorizations.values():
+            project = data.get('group_project', 'Unknown')
+            projects[project] = projects.get(project, 0) + 1
+        print(f"   Por Project: {projects}")
+        
+        # Por spectrum
+        spectrums = {}
+        for data in groups_categorizations.values():
+            spectrum = data.get('group_spectrum', 'Unknown')
+            spectrums[spectrum] = spectrums.get(spectrum, 0) + 1
+        print(f"   Por Spectrum: {spectrums}")
+        
+        # Por stance
+        stances = {}
+        for data in groups_categorizations.values():
+            stance = data.get('group_stance', 'Unknown')
+            stances[stance] = stances.get(stance, 0) + 1
+        print(f"   Por Stance: {stances}")
+        
+        return groups_categorizations
+
 
 # Função de conveniência para uso direto
 def load_telegram_groups(sheet_url: Optional[str] = None) -> List[Dict]:
@@ -394,9 +661,72 @@ def load_telegram_groups(sheet_url: Optional[str] = None) -> List[Dict]:
     return loader.load_groups()
 
 
+def load_groups_with_categorizations(sheet_url: Optional[str] = None, include_uncategorized: bool = True) -> Dict[str, Dict]:
+    """
+    Função de conveniência para carregar grupos com categorizações
+
+    Args:
+        sheet_url: URL da planilha (opcional)
+        include_uncategorized: Se deve incluir grupos sem categorização estruturada
+
+    Returns:
+        Dict com username como chave e dados completos (incluindo categorizações) como valor
+    """
+    loader = GoogleSheetsLoader(sheet_url)
+    return loader.load_groups_with_categorizations(include_uncategorized)
+
+
+def get_group_categorization(group_username: str, groups_categorizations: Dict[str, Dict]) -> Dict:
+    """
+    Busca categorização de um grupo específico
+    
+    Args:
+        group_username: Username do grupo (com ou sem @)
+        groups_categorizations: Dict de categorizações carregado
+
+    Returns:
+        Dict com categorizações do grupo ou fallback padrão
+    """
+    # Normalizar username
+    if not group_username.startswith('@'):
+        group_username = f"@{group_username}"
+    
+    # Tentar buscar com @
+    categorization = groups_categorizations.get(group_username)
+    
+    # Tentar buscar sem @
+    if not categorization:
+        username_no_at = group_username[1:] if group_username.startswith('@') else group_username
+        categorization = groups_categorizations.get(username_no_at)
+    
+    # Fallback para categorização padrão se não encontrar
+    if not categorization:
+        categorization = {
+            'username': group_username,
+            'group_project': 'OTHER',
+            'group_country': 'Unknown',
+            'group_format': 'General',
+            'group_spectrum': 'General',
+            'group_stance': 'General',
+            'group_identity': 'General',
+            'group_basis': 'None',
+            'group_territory': 'Unknown'
+        }
+    
+    return categorization
+
+
+def test_categorization_system(sheet_url: Optional[str] = None, limit: int = 5):
+    """
+    Função de conveniência para testar o sistema de categorização
+    """
+    loader = GoogleSheetsLoader(sheet_url)
+    return loader.test_categorizations(limit)
+
+
 # Exemplo de uso
 if __name__ == "__main__":
-    # Teste da funcionalidade
+    # Teste da funcionalidade original
     loader = GoogleSheetsLoader()
 
     print("🧪 Testando GoogleSheetsLoader...")
@@ -412,3 +742,9 @@ if __name__ == "__main__":
     print("📋 Primeiros grupos:")
     for i, group in enumerate(groups[:5]):
         print(f"  {i+1}. {group['username']} ({group.get('spectrum', 'N/A')})")
+
+    print("\n" + "="*60)
+    
+    # Teste da nova funcionalidade de categorização
+    print("🧪 Testando novo sistema de categorizações...")
+    test_categorization_system(limit=3)
