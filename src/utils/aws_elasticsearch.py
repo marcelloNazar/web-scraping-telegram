@@ -426,11 +426,26 @@ class ElasticsearchClient:
                             }
                         },
                         "date": {"type": "date"},
-                        "views": {"type": "integer"},
-                        "reactions": {"type": "integer"},
+                        "message_id": {"type": "keyword"},
+                        "author_id": {"type": "keyword"},
                         "classification": {"type": "keyword"},
+                        "views": {"type": "long"},
+                        "reactions": {"type": "long"},
+                        "shares": {"type": "long"},
+                        
+                        # NOVOS CAMPOS DE CATEGORIZAÇÃO DO GOOGLE SHEETS
+                        "group_project": {"type": "keyword"},      # Pol, Naz, Conspira, OTHER
+                        "group_country": {"type": "keyword"},      # Brasil, USA, Global
+                        "group_format": {"type": "keyword"},       # Debate, News, Personality
+                        "group_spectrum": {"type": "keyword"},     # Right, Left, General
+                        "group_stance": {"type": "keyword"},       # Conservative, Progressive
+                        "group_identity": {"type": "keyword"},     # General, Socialist, Religious
+                        "group_basis": {"type": "keyword"},        # Bolsonarista, None, etc
+                        "group_territory": {"type": "keyword"},    # National, Regional, Local
+                        
                         "url": {"type": "keyword"},
-                        "indexed_at": {"type": "date"}
+                        "indexed_at": {"type": "date"},
+                        "source": {"type": "keyword"}
                     }
                 }
             }
