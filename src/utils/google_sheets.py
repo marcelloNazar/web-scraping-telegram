@@ -382,9 +382,9 @@ class GoogleSheetsLoader:
 
     def parse_categorization_column(self, categorization_text: str) -> tuple:
         """
-        Parse da coluna 'To Categorize' do Google Sheets
+        Parse da coluna 'To Categorize' do Google Sheets (VERSÃO ROBUSTA)
         
-        Input: '@BolsonaroBR': ['Pol', 'Brasil', 'Debate', 'Right', 'Conservative', 'General', 'Bolsonarista', 'National']
+        Input: 'Direita_FTB: ['Pol', 'Brasil', 'Debate', 'Right', 'Conservative', 'General', 'Bolsonarista', 'National'],'
         Output: (username, dict com categorizações estruturadas)
         """
         try:
@@ -403,19 +403,56 @@ class GoogleSheetsLoader:
                 if username.startswith('@'):
                     username = username[1:]
                 
-                # Parse da lista de categorias
-                try:
-                    categories_list = ast.literal_eval(categories_part.strip())
-                    
-                    if not isinstance(categories_list, list):
-                        print(f"⚠️ Categorias não são uma lista para {username}: {categories_part}")
-                        return None, None
+                # PARSING ROBUSTO: Limpar e normalizar a lista
+                categories_part = categories_part.strip()
+                
+                # Remover vírgula final se houver
+                if categories_part.endswith(','):
+                    categories_part = categories_part[:-1].strip()
+                
+                # Verificar se já está no formato de lista
+                if categories_part.startswith('[') and categories_part.endswith(']'):
+                    try:
+                        # Tentar parse direto
+                        categories_list = ast.literal_eval(categories_part)
                         
-                except (ValueError, SyntaxError) as e:
-                    print(f"⚠️ Erro ao fazer parse de lista para {username}: {e}")
+                        if not isinstance(categories_list, list):
+                            print(f"⚠️ Resultado do parse não é uma lista para {username}: {type(categories_list)}")
+                            return None, None
+                            
+                    except (ValueError, SyntaxError) as e:
+                        print(f"⚠️ Erro no parse literal para {username}: {e}")
+                        print(f"   Tentando parse alternativo...")
+                        
+                        # PARSING ALTERNATIVO: Extrair elementos manualmente
+                        try:
+                            # Remover colchetes
+                            inner_content = categories_part[1:-1].strip()
+                            
+                            # Dividir por vírgulas e limpar cada elemento
+                            raw_elements = inner_content.split(',')
+                            categories_list = []
+                            
+                            for element in raw_elements:
+                                element = element.strip().strip("'\"")
+                                if element:  # Ignorar elementos vazios
+                                    categories_list.append(element)
+                            
+                            print(f"✅ Parse alternativo bem-sucedido para {username}: {len(categories_list)} elementos")
+                            
+                        except Exception as e2:
+                            print(f"❌ Parse alternativo também falhou para {username}: {e2}")
+                            return None, None
+                else:
+                    print(f"⚠️ Formato de lista inválido para {username}: {categories_part}")
                     return None, None
                 
-                # Mapear para estrutura padronizada (8 campos)
+                # Validar se temos pelo menos alguns elementos
+                if len(categories_list) < 4:
+                    print(f"⚠️ Lista muito curta para {username}: {len(categories_list)} elementos (esperado: 8)")
+                    return None, None
+                
+                # Mapear para estrutura padronizada (8 campos com fallbacks)
                 categorization = {
                     'group_project': categories_list[0] if len(categories_list) > 0 else 'OTHER',
                     'group_country': categories_list[1] if len(categories_list) > 1 else 'Unknown',
@@ -434,6 +471,8 @@ class GoogleSheetsLoader:
                 
         except Exception as e:
             print(f"❌ Erro ao fazer parse de categorização: {e}")
+            import traceback
+            print(f"📋 Traceback: {traceback.format_exc()}")
             return None, None
 
     def load_groups_with_categorizations(self, include_uncategorized: bool = True) -> Dict[str, Dict]:
