@@ -4,10 +4,10 @@ Telegram Scraper VM Continuous
 Roda continuamente na VM fazendo scraping e enviando para Kinesis + OpenSearch
 
 GARANTIAS DE COBERTURA:
-- Processa TODOS os 200 grupos a cada 10 minutos
+- Processa TODOS os 200 grupos a cada 5 minutos
 - Primeira execução: últimas 6 horas SEM LIMITE  
 - Execuções seguintes: apenas mensagens novas (min_id)
-- Rate limiting seguro: 1.5s entre grupos
+- Rate limiting seguro: 1.0s entre grupos
 - Controle de estado: zero duplicatas
 - Monitoramento completo: logs detalhados de cobertura
 """
@@ -714,7 +714,7 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
             
             # Rate limiting: pausa segura para evitar flood (10 min ciclo = mais tempo disponível)
             if i < len(groups_to_process) - 1:  # Não pausar no último
-                time.sleep(1.5)  # 1.5s = 200 grupos em ~5 minutos (sobra 5min para processamento)
+                time.sleep(1.0)  # 1.0s = 200 grupos em ~3.5 minutos (sobra 1.5min para processamento)
             
             # Atualizar estado com último message_id processado
             newest_message_id = None
@@ -1007,7 +1007,7 @@ def main():
     total_kinesis_all = 0
     total_opensearch_all = 0
     
-    logger.info("🔄 ==> INICIANDO LOOP CONTÍNUO (execução a cada 10 minutos)")
+    logger.info("🔄 ==> INICIANDO LOOP CONTÍNUO (execução a cada 5 minutos)")
     
     try:
         while running:
@@ -1055,16 +1055,16 @@ def main():
             logger.info("🔍 Total OpenSearch: %d", total_opensearch_all)
             
             if running:
-                logger.info("⏳ Aguardando 10 minutos para próxima execução...")
+                logger.info("⏳ Aguardando 5 minutos para próxima execução...")
                 logger.info("⏹️ Para parar: Ctrl+C")
                 
-                # Aguardar 10 minutos (com verificação a cada 30 segundos)
-                for i in range(20):  # 20 * 30 = 600 segundos = 10 minutos
+                # Aguardar 5 minutos (com verificação a cada 30 segundos)
+                for i in range(10):  # 10 * 30 = 300 segundos = 5 minutos
                     if not running:
                         break
                     time.sleep(30)
-                    if (i + 1) % 4 == 0:  # Log a cada 2 minutos
-                        minutes_remaining = 10 - ((i + 1) * 30) // 60
+                    if (i + 1) % 2 == 0:  # Log a cada 1 minuto
+                        minutes_remaining = 5 - ((i + 1) * 30) // 60
                         logger.info("⏳ %d minuto(s) restante(s)...", minutes_remaining)
     
     except Exception as e:
