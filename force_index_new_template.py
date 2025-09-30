@@ -114,10 +114,7 @@ def force_index_with_new_template():
     for i, message in enumerate(test_messages, 1):
         try:
             # Forçar indexação individual para garantir aplicação do template
-            success = es_client.index_message(
-                message_data=message,
-                index_name="telegram-messages-test"  # Usar nome que força aplicação do template
-            )
+            success = es_client.index_message(message_data=message)
             
             if success:
                 success_count += 1
