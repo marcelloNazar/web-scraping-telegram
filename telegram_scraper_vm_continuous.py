@@ -129,6 +129,66 @@ def load_groups_from_sheets():
         logger.warning("⚠️ ERRO: Google Sheets falhou! Usando apenas 1 grupo de teste: %d grupos", len(fallback_groups))
         return fallback_groups
 
+
+def load_groups_with_categorizations():
+    """
+    Carregar grupos com categorizações completas do Google Sheets
+    NOVA FUNÇÃO para suporte às 8 categorizações estruturadas
+    """
+    try:
+        logger.info("📊 ==> CARREGANDO GRUPOS COM CATEGORIZAÇÕES DO GOOGLE SHEETS")
+        from utils.google_sheets import load_groups_with_categorizations, get_group_categorization
+        
+        # Carregar grupos com categorizações estruturadas
+        groups_categorizations = load_groups_with_categorizations()
+        
+        logger.info("📋 Total grupos com categorização: %d", len(groups_categorizations))
+        
+        # Log dos primeiros grupos para verificação
+        count = 0
+        for username, data in list(groups_categorizations.items())[:5]:
+            count += 1
+            logger.info("📱 Grupo %d: %s (%s/%s/%s)", count, 
+                       username, 
+                       data.get('group_project', 'N/A'),
+                       data.get('group_spectrum', 'N/A'),
+                       data.get('group_stance', 'N/A'))
+        
+        if len(groups_categorizations) > 5:
+            logger.info("📝 ... e mais %d grupos", len(groups_categorizations) - 5)
+            
+        return groups_categorizations
+        
+    except Exception as e:
+        logger.error("❌ Erro ao carregar categorizações do Google Sheets: %s", e)
+        logger.error("📋 Traceback: %s", traceback.format_exc())
+        # Fallback vazio em caso de erro
+        logger.warning("⚠️ ERRO: Google Sheets categorizations falhou! Usando dicionário vazio")
+        return {}
+
+
+def get_group_categorization_safe(group_username, groups_categorizations):
+    """
+    Busca categorização de um grupo com fallback seguro
+    """
+    try:
+        from utils.google_sheets import get_group_categorization
+        return get_group_categorization(group_username, groups_categorizations)
+    except Exception as e:
+        logger.warning("⚠️ Erro ao buscar categorização para %s: %s", group_username, e)
+        # Fallback para categorização padrão
+        return {
+            'username': group_username,
+            'group_project': 'OTHER',
+            'group_country': 'Unknown',
+            'group_format': 'General',
+            'group_spectrum': 'General',
+            'group_stance': 'General',
+            'group_identity': 'General',
+            'group_basis': 'None',
+            'group_territory': 'Unknown'
+        }
+
 def validate_environment():
     """Validar variáveis de ambiente"""
     api_id = os.environ.get('TELEGRAM_API_ID')
@@ -679,15 +739,19 @@ def process_telegram_groups_continuous(client, groups_data, es_client):
     for i, group_info in enumerate(groups_to_process):
         group_username = group_info.get('username', '')
         
-        # Extrair TODAS as categorizações (como na planilha)
-        group_project = group_info.get('project', 'Pol')
-        group_country = group_info.get('country', 'Brasil')
-        group_format = group_info.get('format', 'unknown')      # News, Debate, Meme
-        group_spectrum = group_info.get('spectrum', 'unknown')   # Right, Left, General
-        group_stance = group_info.get('stance', 'unknown')      # Conservative, Progressive
-        group_identity = group_info.get('identity', 'unknown')  # Red Pill, Religious, etc
-        group_basis = group_info.get('basis', 'None')          # Bolsonarista, Lulista, None
-        group_territory = group_info.get('territory', 'National') # National, State-level
+        # Extrair TODAS as categorizações estruturadas (NOVAS da coluna "To Categorize")
+        group_project = group_info.get('group_project', group_info.get('project', 'OTHER'))
+        group_country = group_info.get('group_country', group_info.get('country', 'Unknown'))
+        group_format = group_info.get('group_format', group_info.get('format', 'General'))
+        group_spectrum = group_info.get('group_spectrum', group_info.get('spectrum', 'General'))
+        group_stance = group_info.get('group_stance', group_info.get('stance', 'General'))
+        group_identity = group_info.get('group_identity', group_info.get('identity', 'General'))
+        group_basis = group_info.get('group_basis', group_info.get('basis', 'None'))
+        group_territory = group_info.get('group_territory', group_info.get('territory', 'Unknown'))
+        
+        # Log debug para verificar categorizações
+        logger.debug("📊 Categorizações %s: Project=%s, Spectrum=%s, Stance=%s, Basis=%s",
+                    group_username, group_project, group_spectrum, group_stance, group_basis)
         
         if not group_username:
             continue
@@ -989,11 +1053,23 @@ def main():
     es_client = initialize_elasticsearch()
     cw_monitor = initialize_cloudwatch()
     
-    # Carregar grupos uma vez
+    # Carregar grupos COM categorizações uma vez
+    logger.info("📊 ==> INICIANDO CARREGAMENTO DE GRUPOS COM CATEGORIZAÇÕES")
+    
+    # Carregar categorizações estruturadas do Google Sheets
+    groups_categorizations = load_groups_with_categorizations()
+    if not groups_categorizations:
+        logger.error("❌ Nenhuma categorização carregada. Tentando fallback...")
+        # Fallback para método original se categorizações falharem
     groups_data = load_groups_from_sheets()
     if not groups_data:
         logger.error("❌ Nenhum grupo carregado. Saindo...")
         return
+        logger.warning("⚠️ Usando grupos sem categorização estruturada")
+    else:
+        # Converter dicionário de categorizações para lista compatível
+        groups_data = list(groups_categorizations.values())
+        logger.info("✅ %d grupos carregados COM categorizações estruturadas", len(groups_data))
     
     # Preparar sessão Telegram
     client = setup_telegram_client(config['api_id'], config['api_hash'])
