@@ -79,13 +79,12 @@ class ElasticsearchClient:
             if self.domain_endpoint:
                 self._test_connection()
                 self.enabled = True
-                print(f"✅ Elasticsearch endpoint configurado: {self.domain_endpoint}")
+                print("✅ OpenSearch configurado com sucesso")
             else:
-                print("⚠️ Elasticsearch não disponível: domínio não encontrado")
+                print("⚠️ OpenSearch não disponível: domínio não encontrado")
 
         except (NoCredentialsError, ClientError) as e:
-            print(f"⚠️ Elasticsearch não disponível: {e}")
-            print("📝 Continuando sem indexação")
+            print(f"⚠️ OpenSearch não disponível: {e}")
             self.enabled = False
 
     def _get_aws4_auth(self):
@@ -101,8 +100,6 @@ class ElasticsearchClient:
             
             # Obter região atual
             region = session.region_name or os.getenv('AWS_DEFAULT_REGION', 'us-east-1')
-            print(f"🌍 Região detectada: {region}")
-            
             if not credentials:
                 print("❌ Credenciais AWS não encontradas")
                 return None
@@ -115,9 +112,6 @@ class ElasticsearchClient:
                 'es',         # serviço
                 session_token=credentials.token  # CRÍTICO para assumed roles
             )
-            
-            print(f"🔑 Credenciais: access_key={credentials.access_key[:8]}...")
-            print(f"🎫 Session token: {'✅ Presente' if credentials.token else '❌ Ausente'}")
             
             print("✅ AWS4Auth configurado com sucesso")
             return auth
@@ -164,10 +158,8 @@ class ElasticsearchClient:
             
             if endpoint:
                 self.domain_endpoint = f"https://{endpoint}"
-                print(f"🔗 Endpoint configurado: {self.domain_endpoint}")
             else:
                 print(f"❌ Não foi possível obter endpoint do domínio '{self.domain_name}'")
-                print(f"📋 Debug - domain_info keys: {list(domain_info.keys())}")
                 return
 
         except ClientError as e:
@@ -196,15 +188,14 @@ class ElasticsearchClient:
             status = health.get('status', 'unknown')
 
             if status in ['red']:
-                print(f"⚠️ Cluster Elasticsearch não está saudável: {status}")
-            else:
-                print(f"✅ Cluster Elasticsearch saudável: {status}")
+                print(f"⚠️ Cluster OpenSearch não está saudável: {status}")
+            # Cluster saudável - sem log (reduz verbosidade)
 
         except Exception as e:
-            print(f"❌ Erro ao testar conexão: {e}")
-            print("⚠️ OpenSearch VPC requer assinatura AWS4")
-            print("📝 Continuando sem teste de conectividade...")
-            # Não fazer raise - permite que o sistema continue
+            # Reduzido verbosidade - apenas log de erro se crítico
+            if "403" in str(e) or "401" in str(e):
+                print(f"❌ Erro de autenticação OpenSearch: {e}")
+            # Outros erros não são logados para reduzir verbosidade
             return
 
     def index_message(self, message_data: Dict[str, Any], doc_id: Optional[str] = None) -> bool:
